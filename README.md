@@ -21,6 +21,24 @@ For an overnight run that survives terminal/laptop sleep:
 
     caffeinate -i nohup ./claude-marathon "..." /path/to/repo &
 
+## Run as a managed LaunchAgent (recommended for overnight)
+
+`marathon-launchd` installs a macOS LaunchAgent so the run is fully detached
+from any terminal (survives logout), `caffeinate`-wrapped so the Mac won't
+sleep, and **self-removing** when the task finishes — so it will not re-run on
+your next login or reboot.
+
+    ./marathon-launchd "Refactor module X and make all tests pass" /path/to/repo
+
+Inspect the plist before loading:
+
+    ./marathon-launchd --dry-run "..." /path/to/repo
+
+The task text is passed through the plist's `EnvironmentVariables`, never
+shell-interpolated, so quotes and special characters in the task are safe.
+Logs and the plist are labelled `com.claude-marathon.<timestamp>`. Stop a run
+early with the `launchctl bootout ...` command printed at install time.
+
 ## Safety
 
 - Runs with `--permission-mode bypassPermissions` (fully unattended). **Run it

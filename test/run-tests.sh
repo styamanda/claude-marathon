@@ -123,6 +123,33 @@ chmod +x "$BIN" 2>/dev/null || true
 "$BIN" >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: no args -> usage exit 64"
 assert_eq "$("$BIN" --version)" "claude-marathon 0.1.0" "entrypoint: --version prints version"
 
+# --- xml_escape ---
+assert_eq "$(xml_escape 'a&b<c>d"e'\''f')" "a&amp;b&lt;c&gt;d&quot;e&apos;f" "xml_escape: escapes & < > \" '"
+
+# --- render_launchd_plist: valid plist even with special chars in task ---
+PLIST_TMP=$(mktemp -d)
+render_launchd_plist "com.test.marathon" 'Fix A & B <urgent>' "/tmp/work" \
+  "$PLIST_TMP/run.log" "$HERE/../claude-marathon" > "$PLIST_TMP/test.plist"
+plutil -lint "$PLIST_TMP/test.plist" >/dev/null 2>&1
+assert_eq "$?" "0" "render: produced plist passes plutil -lint"
+assert_eq "$(plutil -extract Label raw "$PLIST_TMP/test.plist" 2>/dev/null)" \
+  "com.test.marathon" "render: Label set correctly"
+assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_TASK raw "$PLIST_TMP/test.plist" 2>/dev/null)" \
+  "Fix A & B <urgent>" "render: task round-trips through plist unescaped"
+rm -rf "$PLIST_TMP"
+
+# --- marathon-launchd --dry-run: writes a lint-clean plist, does not load ---
+LAUNCHD_BIN="$HERE/../marathon-launchd"
+chmod +x "$LAUNCHD_BIN" 2>/dev/null || true
+"$LAUNCHD_BIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-launchd: no args -> usage exit 64"
+DRY_TMP=$(mktemp -d)
+DRY_OUT=$(MARATHON_LOG_DIR="$DRY_TMP/logs" "$LAUNCHD_BIN" --dry-run "test task" "$DRY_TMP")
+assert_eq "$?" "0" "marathon-launchd: --dry-run exits 0"
+DRY_PLIST=$(echo "$DRY_OUT" | sed -n 's/^Wrote (dry-run): //p')
+plutil -lint "$DRY_PLIST" >/dev/null 2>&1
+assert_eq "$?" "0" "marathon-launchd: --dry-run plist passes plutil -lint"
+rm -f "$DRY_PLIST"; rm -rf "$DRY_TMP"
+
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 (( FAIL == 0 ))

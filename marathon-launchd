@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=marathon-lib.sh
+source "$SCRIPT_DIR/marathon-lib.sh"
+
+DRYRUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then DRYRUN=1; shift; fi
+
+if [[ $# -lt 1 || -z "${1:-}" ]]; then
+  cat >&2 <<'USAGE'
+Usage: marathon-launchd [--dry-run] "<task>" [workdir]
+
+Installs a macOS LaunchAgent that runs claude-marathon detached from any
+terminal (survives logout), wrapped in caffeinate so the Mac won't sleep.
+The job self-removes when the task finishes, so it will not re-run on reboot.
+
+  --dry-run   Write the plist and print the load command, but don't load it.
+USAGE
+  exit 64
+fi
+
+TASK="$1"
+WORKDIR=$(cd "${2:-$PWD}" && pwd)
+LABEL="com.claude-marathon.$(date +%Y%m%d-%H%M%S)"
+LA_DIR="$HOME/Library/LaunchAgents"
+PLIST="$LA_DIR/$LABEL.plist"
+LOGDIR="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
+LOGFILE="$LOGDIR/$LABEL.log"
+SCRIPT="$SCRIPT_DIR/claude-marathon"
+
+mkdir -p "$LA_DIR" "$LOGDIR"
+render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" > "$PLIST"
+
+if (( DRYRUN )); then
+  echo "Wrote (dry-run): $PLIST"
+  echo "Load with: launchctl bootstrap gui/$(id -u) \"$PLIST\""
+  exit 0
+fi
+
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+echo "Loaded LaunchAgent: $LABEL"
+echo "  task:    $TASK"
+echo "  workdir: $WORKDIR"
+echo "  log:     $LOGFILE"
+echo "  plist:   $PLIST (self-removes on completion)"
+echo "Stop early with: launchctl bootout gui/$(id -u)/$LABEL"

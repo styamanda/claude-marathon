@@ -164,3 +164,59 @@ run_marathon() {
   echo "CAP reached: $max iteration(s) without completion. Logs: $logdir"
   return 2
 }
+
+# xml_escape <string> -> XML/plist-safe string (escapes & < > " ')
+xml_escape() {
+  local s="$1"
+  s=${s//&/&amp;}
+  s=${s//</&lt;}
+  s=${s//>/&gt;}
+  s=${s//\"/&quot;}
+  s=${s//\'/&apos;}
+  printf '%s' "$s"
+}
+
+# render_launchd_plist <label> <task> <workdir> <logfile> <script_path> -> plist XML
+# Task/workdir are passed via EnvironmentVariables (never shell-interpolated).
+# The job runs caffeinate -> claude-marathon, then boots itself out and deletes
+# its own plist, so it does NOT re-run on next login/reboot.
+render_launchd_plist() {
+  local label="$1" task="$2" workdir="$3" logfile="$4" script="$5"
+  local uid plist
+  uid=$(id -u)
+  plist="$HOME/Library/LaunchAgents/${label}.plist"
+
+  local e_label e_task e_workdir e_logfile e_script e_plist
+  e_label=$(xml_escape "$label")
+  e_task=$(xml_escape "$task")
+  e_workdir=$(xml_escape "$workdir")
+  e_logfile=$(xml_escape "$logfile")
+  e_script=$(xml_escape "$script")
+  e_plist=$(xml_escape "$plist")
+
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${e_label}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MARATHON_TASK</key><string>${e_task}</string>
+    <key>MARATHON_WORKDIR</key><string>${e_workdir}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>caffeinate -i "${e_script}" "\$MARATHON_TASK" "\$MARATHON_WORKDIR"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null; rm -f "${e_plist}"</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key><string>${e_logfile}</string>
+  <key>StandardErrorPath</key><string>${e_logfile}</string>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+PLIST
+}
