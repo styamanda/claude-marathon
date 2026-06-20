@@ -62,8 +62,20 @@ early with the `launchctl bootout ...` command printed at install time.
 
     bash test/run-tests.sh
 
-## Known unknown
+## Usage-limit detection
 
-The usage-limit marker is parsed as `usage limit reached|<epoch>`. Confirm this
-matches your CLI's real headless output on the first genuine limit hit; the
-fallback-sleep path keeps the loop alive if the format differs.
+Verified against Claude Code CLI **v2.1.183**. Limit detection accepts three
+signals, most precise first:
+
+1. **`resetsAt`** — a JSON field carrying the reset time as Unix epoch seconds
+   (the CLI derives it from the `anthropic-ratelimit-unified-reset` response
+   header). Used to sleep exactly until reset.
+2. Legacy `usage limit reached|<epoch>` pipe-delimited text (older builds).
+3. The bare phrase `usage limit reached` with no machine-readable time — the
+   loop falls back to `MARATHON_FALLBACK_SLEEP` (default 30 min) and retries.
+
+The exact shape of the headless `--print --output-format json` payload during a
+real limit could not be triggered on demand; signal (3) guarantees the loop
+keeps working even if the payload omits `resetsAt`. On your first genuine limit
+hit, check the log: a "sleeping Ns until reset" line with N in the thousands
+means `resetsAt` was found; repeated 1800s sleeps mean it fell back to (3).

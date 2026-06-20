@@ -16,14 +16,34 @@ marathon_version() {
   echo "claude-marathon 0.1.0"
 }
 
-# classify_result <raw_output> <exit_code> -> "OK" | "LIMIT <epoch>" | "ERROR <msg>"
+# classify_result <raw_output> <exit_code> -> "OK" | "LIMIT <epoch|unknown>" | "ERROR <msg>"
+#
+# Usage-limit detection for Claude Code (verified against CLI v2.1.183):
+#   - The CLI carries the reset time in a JSON field `resetsAt` (Unix epoch
+#     seconds, from the `anthropic-ratelimit-unified-reset` response header).
+#   - The user-facing text is "usage limit reached" (no pipe-epoch).
+# We accept three signals, most precise first:
+#   1) a `resetsAt` epoch anywhere in the JSON  -> LIMIT <epoch>
+#   2) legacy "usage limit reached|<epoch>" text -> LIMIT <epoch>
+#   3) the bare "usage limit reached" phrase     -> LIMIT unknown (use fallback)
 classify_result() {
   local raw="$1" exit_code="$2"
 
   local epoch
-  epoch=$(printf '%s' "$raw" | grep -oE 'usage limit reached\|[0-9]+' | head -1 | grep -oE '[0-9]+$')
+  # (1) structured resetsAt field (current CLI), epoch seconds
+  epoch=$(printf '%s' "$raw" | jq -r '[.. | .resetsAt? | numbers] | first // empty' 2>/dev/null)
+  # (2) legacy pipe-delimited epoch
+  if [[ -z "$epoch" ]]; then
+    epoch=$(printf '%s' "$raw" | grep -oE 'usage limit reached\|[0-9]+' | head -1 | grep -oE '[0-9]+$')
+  fi
+
   if [[ -n "$epoch" ]]; then
     echo "LIMIT $epoch"
+    return 0
+  fi
+  # (3) phrase present but no machine-readable reset time -> fallback sleep
+  if printf '%s' "$raw" | grep -qiE 'usage (limit|credit limit) reached'; then
+    echo "LIMIT unknown"
     return 0
   fi
 

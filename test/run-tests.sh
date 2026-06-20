@@ -25,7 +25,11 @@ assert_eq "$(marathon_version)" "claude-marathon 0.1.0" "marathon_version return
 
 # --- classify_result ---
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit.json")" 0)" \
-  "LIMIT 1750464000" "classify: usage limit -> LIMIT epoch"
+  "LIMIT 1750464000" "classify: legacy pipe format -> LIMIT epoch"
+assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit_resetsat.json")" 0)" \
+  "LIMIT 1750464000" "classify: resetsAt field (CLI v2.1.x) -> LIMIT epoch"
+assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit_text.json")" 0)" \
+  "LIMIT unknown" "classify: bare 'usage limit reached' phrase -> LIMIT unknown"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/success.json")" 0)" \
   "OK" "classify: clean success -> OK"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/error.json")" 0)" \
