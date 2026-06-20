@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 # Resolve symlinks so the lib + claude-marathon are found via a symlink on PATH.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
@@ -51,8 +51,14 @@ LOGDIR="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
 LOGFILE="$LOGDIR/$LABEL.log"
 SCRIPT="$SCRIPT_DIR/claude-marathon"
 
+# Resolve claude to an absolute path now (interactive shell has it on PATH).
+# launchd runs the job under a minimal PATH that omits ~/.local/bin, so the
+# job must call claude by absolute path, not rely on PATH.
+CLAUDE_BIN=$(command -v claude 2>/dev/null || true)
+[[ -z "$CLAUDE_BIN" ]] && CLAUDE_BIN="claude"
+
 mkdir -p "$LA_DIR" "$LOGDIR"
-render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" "$RESUME_ID" > "$PLIST"
+render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" "$RESUME_ID" "$CLAUDE_BIN" > "$PLIST"
 
 if (( DRYRUN )); then
   echo "Wrote (dry-run): $PLIST"

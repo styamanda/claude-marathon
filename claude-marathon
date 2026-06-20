@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 # Resolve symlinks so the lib is found when invoked via a symlink on PATH.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do

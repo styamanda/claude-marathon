@@ -79,6 +79,7 @@ compute_sleep() {
 
 # run_with_timeout <seconds> <cmd...> -> cmd exit code, or 124 if timed out
 run_with_timeout() {
+  set +e   # this function manages exit codes explicitly; never let a caller's errexit abort the loop
   local secs="$1"; shift
   "$@" &
   local cmd_pid=$!
@@ -136,6 +137,7 @@ run_iteration() {
 
 # run_marathon <task> [workdir] [resume_id] -> 0 done | 1 error | 2 cap reached
 run_marathon() {
+  set +e   # the loop classifies non-zero claude exits (limit/error); never let errexit abort it
   local task="$1" workdir="${2:-$PWD}" resume_id="${3:-}"
   local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
   local max="${MARATHON_MAX_ITERS:-20}"
@@ -207,12 +209,12 @@ xml_escape() {
 # The job runs caffeinate -> claude-marathon, then boots itself out and deletes
 # its own plist, so it does NOT re-run on next login/reboot.
 render_launchd_plist() {
-  local label="$1" task="$2" workdir="$3" logfile="$4" script="$5" resume_id="${6:-}"
+  local label="$1" task="$2" workdir="$3" logfile="$4" script="$5" resume_id="${6:-}" claude_cmd="${7:-claude}"
   local uid plist
   uid=$(id -u)
   plist="$HOME/Library/LaunchAgents/${label}.plist"
 
-  local e_label e_task e_workdir e_logfile e_script e_plist e_resume
+  local e_label e_task e_workdir e_logfile e_script e_plist e_resume e_claude
   e_label=$(xml_escape "$label")
   e_task=$(xml_escape "$task")
   e_workdir=$(xml_escape "$workdir")
@@ -220,6 +222,7 @@ render_launchd_plist() {
   e_script=$(xml_escape "$script")
   e_plist=$(xml_escape "$plist")
   e_resume=$(xml_escape "$resume_id")
+  e_claude=$(xml_escape "$claude_cmd")
 
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -232,6 +235,7 @@ render_launchd_plist() {
     <key>MARATHON_TASK</key><string>${e_task}</string>
     <key>MARATHON_WORKDIR</key><string>${e_workdir}</string>
     <key>MARATHON_RESUME</key><string>${e_resume}</string>
+    <key>MARATHON_CLAUDE_CMD</key><string>${e_claude}</string>
   </dict>
   <key>ProgramArguments</key>
   <array>

@@ -132,6 +132,24 @@ OUT3=$(MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
        run_marathon "broken" "$ERR_TMP/work"); RC3=$?
 assert_eq "$RC3" "1" "marathon: returns 1 on hard error"
 
+# --- run_marathon: survives a caller's set -e when claude exits non-zero ---
+# Regression: launchd job used `set -e`, so a failing/limit claude aborted the
+# loop instead of being classified. run_marathon must neutralize errexit itself.
+SETE_TMP=$(mktemp -d); mkdir -p "$SETE_TMP/work" "$SETE_TMP/logs"
+cat > "$SETE_TMP/fake.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "claude: command not found" >&2
+exit 127
+EOF
+chmod +x "$SETE_TMP/fake.sh"
+SETE_OUT=$( set -e
+  MARATHON_CLAUDE_CMD="$SETE_TMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$SETE_TMP/logs" MARATHON_MAX_ITERS=3 \
+  run_marathon "x" "$SETE_TMP/work" ); SETE_RC=$?
+assert_eq "$SETE_RC" "1" "marathon: under caller set -e, failing claude -> rc=1 (not aborted)"
+assert_eq "$(echo "$SETE_OUT" | grep -c 'ERROR stop')" "1" "marathon: under set -e, loop ran and printed ERROR stop"
+rm -rf "$SETE_TMP"
+
 rm -rf "$LOOP_TMP" "$CAP_TMP" "$ERR_TMP"
 
 # --- entrypoint ---
@@ -169,6 +187,14 @@ plutil -lint "$PLIST_TMP/r.plist" >/dev/null 2>&1
 assert_eq "$?" "0" "render: plist with resume id passes plutil -lint"
 assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_RESUME raw "$PLIST_TMP/r.plist" 2>/dev/null)" \
   "sess-xyz789" "render: MARATHON_RESUME set from resume id"
+
+# render bakes an explicit claude command path (PATH-independence for launchd)
+assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_CLAUDE_CMD raw "$PLIST_TMP/test.plist" 2>/dev/null)" \
+  "claude" "render: MARATHON_CLAUDE_CMD defaults to 'claude'"
+render_launchd_plist "com.test.cc" "t" "/tmp" "$PLIST_TMP/cc.log" "/x/claude-marathon" "" "/abs/bin/claude" \
+  > "$PLIST_TMP/cc.plist"
+assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_CLAUDE_CMD raw "$PLIST_TMP/cc.plist" 2>/dev/null)" \
+  "/abs/bin/claude" "render: MARATHON_CLAUDE_CMD set from arg"
 rm -rf "$PLIST_TMP"
 
 # --- marathon-launchd --dry-run: writes a lint-clean plist, does not load ---
@@ -181,6 +207,9 @@ assert_eq "$?" "0" "marathon-launchd: --dry-run exits 0"
 DRY_PLIST=$(echo "$DRY_OUT" | sed -n 's/^Wrote (dry-run): //p')
 plutil -lint "$DRY_PLIST" >/dev/null 2>&1
 assert_eq "$?" "0" "marathon-launchd: --dry-run plist passes plutil -lint"
+DRY_CC=$(plutil -extract EnvironmentVariables.MARATHON_CLAUDE_CMD raw "$DRY_PLIST" 2>/dev/null)
+case "$DRY_CC" in /*) DRY_ABS=yes;; *) DRY_ABS=no;; esac
+assert_eq "$DRY_ABS" "yes" "marathon-launchd: bakes absolute claude path (PATH-independent)"
 rm -f "$DRY_PLIST"; rm -rf "$DRY_TMP"
 
 echo "-----------------------------"
