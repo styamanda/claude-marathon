@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# marathon-lib.sh — pure functions for claude-marathon.
+# Side-effect free on source: defines vars + functions only.
+
+: "${MARATHON_MAX_ITERS:=20}"
+: "${MARATHON_TIMEOUT:=7200}"
+: "${MARATHON_FALLBACK_SLEEP:=1800}"
+: "${MARATHON_BUFFER:=60}"
+: "${MARATHON_SENTINEL:=.marathon-done}"
+: "${MARATHON_LOG_DIR:=$HOME/.claude/marathon-logs}"
+: "${MARATHON_CLAUDE_CMD:=claude}"
+: "${MARATHON_SLEEP_CMD:=sleep}"
+: "${MARATHON_NOTIFY:=auto}"
+
+marathon_version() {
+  echo "claude-marathon 0.1.0"
+}
+
+# classify_result <raw_output> <exit_code> -> "OK" | "LIMIT <epoch>" | "ERROR <msg>"
+classify_result() {
+  local raw="$1" exit_code="$2"
+
+  local epoch
+  epoch=$(printf '%s' "$raw" | grep -oE 'usage limit reached\|[0-9]+' | head -1 | grep -oE '[0-9]+$')
+  if [[ -n "$epoch" ]]; then
+    echo "LIMIT $epoch"
+    return 0
+  fi
+
+  local is_err
+  is_err=$(printf '%s' "$raw" | jq -r '.is_error // empty' 2>/dev/null)
+  if [[ "$is_err" == "true" ]]; then
+    local msg
+    msg=$(printf '%s' "$raw" | jq -r '.result // .error // "unknown error"' 2>/dev/null)
+    [[ -z "$msg" || "$msg" == "null" ]] && msg="unknown error"
+    echo "ERROR $msg"
+    return 0
+  fi
+
+  if [[ "$exit_code" -ne 0 ]]; then
+    echo "ERROR exit_code=$exit_code"
+    return 0
+  fi
+
+  echo "OK"
+}
+
+# compute_sleep <epoch> <now> <buffer> <fallback> -> seconds
+compute_sleep() {
+  local epoch="$1" now="$2" buffer="$3" fallback="$4"
+  if ! [[ "$epoch" =~ ^[0-9]+$ ]]; then
+    echo "$fallback"
+    return 0
+  fi
+  local diff=$(( epoch - now + buffer ))
+  (( diff < 0 )) && diff=0
+  echo "$diff"
+}
+
+# run_with_timeout <seconds> <cmd...> -> cmd exit code, or 124 if timed out
+run_with_timeout() {
+  local secs="$1"; shift
+  "$@" &
+  local cmd_pid=$!
+  local count=0
+  while kill -0 "$cmd_pid" 2>/dev/null; do
+    if (( count >= secs )); then
+      kill -TERM "$cmd_pid" 2>/dev/null
+      wait "$cmd_pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    ((count++))
+  done
+  wait "$cmd_pid"
+  return $?
+}
+
+# notify <title> <message> -> side effect (desktop notification / echo)
+notify() {
+  local title="$1" msg="$2"
+  case "${MARATHON_NOTIFY:-auto}" in
+    off)  return 0 ;;
+    echo) echo "[notify] ${title}: ${msg}"; return 0 ;;
+  esac
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"${msg}\" with title \"${title}\"" >/dev/null 2>&1
+  else
+    echo "[notify] ${title}: ${msg}"
+  fi
+}
+
+# run_iteration <iter> <workdir> <task> <outfile> -> claude exit code
+run_iteration() {
+  local iter="$1" workdir="$2" task="$3" outfile="$4"
+  local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
+  local instr="When the ENTIRE task is fully complete and verified, your final action must be to create an empty file named '${sentinel}' in this directory. Do not create it until everything is truly finished."
+
+  local -a cmd
+  cmd=( "${MARATHON_CLAUDE_CMD:-claude}" -p --output-format json --permission-mode bypassPermissions )
+  if (( iter == 0 )); then
+    cmd+=( "${task}"$'\n\n'"${instr}" )
+  else
+    cmd+=( --continue "Continue the task where you left off. ${instr}" )
+  fi
+
+  ( cd "$workdir" && run_with_timeout "${MARATHON_TIMEOUT:-7200}" "${cmd[@]}" ) > "$outfile" 2>&1
+  return $?
+}
+
+# run_marathon <task> [workdir] -> 0 done | 1 error | 2 cap reached
+run_marathon() {
+  local task="$1" workdir="${2:-$PWD}"
+  local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
+  local max="${MARATHON_MAX_ITERS:-20}"
+  local buffer="${MARATHON_BUFFER:-60}"
+  local fallback="${MARATHON_FALLBACK_SLEEP:-1800}"
+  local logdir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
+  local sleepcmd="${MARATHON_SLEEP_CMD:-sleep}"
+
+  mkdir -p "$logdir"
+  rm -f "$workdir/$sentinel"
+
+  local iter=0
+  while (( iter < max )); do
+    local stamp outfile
+    stamp=$(date +%Y%m%d-%H%M%S)
+    outfile="$logdir/iter-${iter}-${stamp}.log"
+
+    run_iteration "$iter" "$workdir" "$task" "$outfile"
+    local code=$?
+
+    if [[ -f "$workdir/$sentinel" ]]; then
+      notify "claude-marathon" "Task complete after $((iter+1)) iteration(s)."
+      echo "DONE after $((iter+1)) iteration(s). Logs: $logdir"
+      return 0
+    fi
+
+    local raw verdict
+    raw=$(cat "$outfile" 2>/dev/null)
+    verdict=$(classify_result "$raw" "$code")
+
+    case "$verdict" in
+      LIMIT*)
+        local epoch secs
+        epoch=${verdict#LIMIT }
+        secs=$(compute_sleep "$epoch" "$(date +%s)" "$buffer" "$fallback")
+        echo "Usage limit hit; sleeping ${secs}s until reset (iter $iter)."
+        "$sleepcmd" "$secs"
+        ;;
+      ERROR*)
+        notify "claude-marathon" "Stopped on error: ${verdict#ERROR }"
+        echo "ERROR stop: ${verdict#ERROR }. Logs: $logdir"
+        return 1
+        ;;
+      OK)
+        : # made progress but not done; keep going
+        ;;
+    esac
+    ((iter++))
+  done
+
+  notify "claude-marathon" "Stopped: reached max iterations ($max)."
+  echo "CAP reached: $max iteration(s) without completion. Logs: $logdir"
+  return 2
+}
