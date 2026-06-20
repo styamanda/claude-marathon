@@ -127,6 +127,13 @@ chmod +x "$BIN" 2>/dev/null || true
 "$BIN" >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: no args -> usage exit 64"
 assert_eq "$("$BIN" --version)" "claude-marathon 0.1.0" "entrypoint: --version prints version"
 
+# --- entrypoint via symlink (finds lib through resolved path) ---
+LINK_TMP=$(mktemp -d)
+ln -s "$BIN" "$LINK_TMP/claude-marathon"
+assert_eq "$("$LINK_TMP/claude-marathon" --version)" "claude-marathon 0.1.0" \
+  "entrypoint: works when invoked via symlink"
+rm -rf "$LINK_TMP"
+
 # --- xml_escape ---
 assert_eq "$(xml_escape 'a&b<c>d"e'\''f')" "a&amp;b&lt;c&gt;d&quot;e&apos;f" "xml_escape: escapes & < > \" '"
 
