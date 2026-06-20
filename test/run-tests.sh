@@ -195,6 +195,15 @@ render_launchd_plist "com.test.cc" "t" "/tmp" "$PLIST_TMP/cc.log" "/x/claude-mar
   > "$PLIST_TMP/cc.plist"
 assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_CLAUDE_CMD raw "$PLIST_TMP/cc.plist" 2>/dev/null)" \
   "/abs/bin/claude" "render: MARATHON_CLAUDE_CMD set from arg"
+
+# self-cleanup must delete the plist BEFORE bootout (bootout kills its own shell)
+ORD_LINE=$(render_launchd_plist "com.test.ord" "t" "/tmp" "/tmp/o.log" "/x/cm" | grep 'caffeinate')
+ORD_RM=$(awk -v s="$ORD_LINE" 'BEGIN{print index(s,"rm -f")}')
+ORD_BO=$(awk -v s="$ORD_LINE" 'BEGIN{print index(s,"bootout")}')
+case "$(( ORD_RM>0 && ORD_BO>0 && ORD_RM<ORD_BO ))" in
+  1) ORD=ok;; *) ORD=bad;;
+esac
+assert_eq "$ORD" "ok" "render: plist self-deletes BEFORE bootout (no reboot re-run)"
 rm -rf "$PLIST_TMP"
 
 # --- marathon-launchd --dry-run: writes a lint-clean plist, does not load ---

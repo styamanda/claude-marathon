@@ -241,7 +241,7 @@ render_launchd_plist() {
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>caffeinate -i "${e_script}" \${MARATHON_RESUME:+--resume "\$MARATHON_RESUME"} "\$MARATHON_TASK" "\$MARATHON_WORKDIR"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null; rm -f "${e_plist}"</string>
+    <string>caffeinate -i "${e_script}" \${MARATHON_RESUME:+--resume "\$MARATHON_RESUME"} "\$MARATHON_TASK" "\$MARATHON_WORKDIR"; rm -f "${e_plist}"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
