@@ -12,17 +12,32 @@ SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
 source "$SCRIPT_DIR/marathon-lib.sh"
 
 DRYRUN=0
-if [[ "${1:-}" == "--dry-run" ]]; then DRYRUN=1; shift; fi
+RESUME_ID=""
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --dry-run) DRYRUN=1; shift ;;
+    --resume)
+      RESUME_ID="${2:-}"
+      if [[ -z "$RESUME_ID" ]]; then
+        echo "error: --resume requires a session id" >&2
+        exit 64
+      fi
+      shift 2
+      ;;
+    *) break ;;
+  esac
+done
 
 if [[ $# -lt 1 || -z "${1:-}" ]]; then
   cat >&2 <<'USAGE'
-Usage: marathon-launchd [--dry-run] "<task>" [workdir]
+Usage: marathon-launchd [--dry-run] [--resume <session-id>] "<task>" [workdir]
 
 Installs a macOS LaunchAgent that runs claude-marathon detached from any
 terminal (survives logout), wrapped in caffeinate so the Mac won't sleep.
 The job self-removes when the task finishes, so it will not re-run on reboot.
 
-  --dry-run   Write the plist and print the load command, but don't load it.
+  --dry-run        Write the plist and print the load command, but don't load it.
+  --resume <id>    Resume a specific existing session on the first iteration.
 USAGE
   exit 64
 fi
@@ -37,7 +52,7 @@ LOGFILE="$LOGDIR/$LABEL.log"
 SCRIPT="$SCRIPT_DIR/claude-marathon"
 
 mkdir -p "$LA_DIR" "$LOGDIR"
-render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" > "$PLIST"
+render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" "$RESUME_ID" > "$PLIST"
 
 if (( DRYRUN )); then
   echo "Wrote (dry-run): $PLIST"

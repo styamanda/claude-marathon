@@ -17,6 +17,20 @@ CLI. A slash command runs inside the very session that is frozen.
 Completion is signalled by Claude creating a `.marathon-done` file as its final
 action. The loop checks for it after every run.
 
+### Resuming a specific existing session
+
+By default the first iteration starts a fresh conversation. To instead continue
+a specific conversation you started interactively, pass its session id:
+
+    ./claude-marathon --resume <session-id> "Continue where we left off" /path/to/repo
+    ./marathon-launchd --resume <session-id> "Continue where we left off" /path/to/repo
+
+Find session ids with `claude --resume` (interactive picker) or under
+`~/.claude/projects/`. The id is used on the **first** iteration only; later
+iterations use `--continue`, which follows the most recent conversation in the
+working directory. Do not run this while an interactive session in the same
+directory is still open — both would resume the same conversation and collide.
+
 For an overnight run that survives terminal/laptop sleep:
 
     caffeinate -i nohup ./claude-marathon "..." /path/to/repo &

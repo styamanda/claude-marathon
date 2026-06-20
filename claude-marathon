@@ -11,16 +11,29 @@ SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
 # shellcheck source=marathon-lib.sh
 source "$SCRIPT_DIR/marathon-lib.sh"
 
+RESUME_ID=""
 case "${1:-}" in
   -v|--version) marathon_version; exit 0 ;;
+  -r|--resume)
+    RESUME_ID="${2:-}"
+    if [[ -z "$RESUME_ID" ]]; then
+      echo "error: --resume requires a session id" >&2
+      exit 64
+    fi
+    shift 2
+    ;;
 esac
 
 if [[ $# -lt 1 || -z "${1:-}" ]]; then
   cat >&2 <<'USAGE'
-Usage: claude-marathon "<task description>" [workdir]
+Usage: claude-marathon [--resume <session-id>] "<task description>" [workdir]
 
 Runs Claude Code headless in a loop, sleeping through usage-limit resets and
 resuming the same conversation until the task self-reports complete.
+
+  --resume <id>   Resume a specific existing session on the first iteration
+                  (instead of starting a fresh conversation). Find ids with
+                  `claude --resume` or in ~/.claude/projects/.
 
 Env overrides: MARATHON_MAX_ITERS, MARATHON_TIMEOUT, MARATHON_FALLBACK_SLEEP,
 MARATHON_BUFFER, MARATHON_LOG_DIR, MARATHON_SENTINEL, MARATHON_NOTIFY.
@@ -28,4 +41,4 @@ USAGE
   exit 64
 fi
 
-run_marathon "$1" "${2:-$PWD}"
+run_marathon "$1" "${2:-$PWD}" "$RESUME_ID"

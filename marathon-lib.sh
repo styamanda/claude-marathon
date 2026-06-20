@@ -110,16 +110,22 @@ notify() {
   fi
 }
 
-# run_iteration <iter> <workdir> <task> <outfile> -> claude exit code
+# run_iteration <iter> <workdir> <task> <outfile> [resume_id] -> claude exit code
+# Iteration 0: seed a fresh conversation, OR resume <resume_id> if given.
+# Iterations 1+: always --continue the most recent conversation in workdir.
 run_iteration() {
-  local iter="$1" workdir="$2" task="$3" outfile="$4"
+  local iter="$1" workdir="$2" task="$3" outfile="$4" resume_id="${5:-}"
   local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
   local instr="When the ENTIRE task is fully complete and verified, your final action must be to create an empty file named '${sentinel}' in this directory. Do not create it until everything is truly finished."
 
   local -a cmd
   cmd=( "${MARATHON_CLAUDE_CMD:-claude}" -p --output-format json --permission-mode bypassPermissions )
   if (( iter == 0 )); then
-    cmd+=( "${task}"$'\n\n'"${instr}" )
+    if [[ -n "$resume_id" ]]; then
+      cmd+=( --resume "$resume_id" "${task}"$'\n\n'"${instr}" )
+    else
+      cmd+=( "${task}"$'\n\n'"${instr}" )
+    fi
   else
     cmd+=( --continue "Continue the task where you left off. ${instr}" )
   fi
@@ -128,9 +134,9 @@ run_iteration() {
   return $?
 }
 
-# run_marathon <task> [workdir] -> 0 done | 1 error | 2 cap reached
+# run_marathon <task> [workdir] [resume_id] -> 0 done | 1 error | 2 cap reached
 run_marathon() {
-  local task="$1" workdir="${2:-$PWD}"
+  local task="$1" workdir="${2:-$PWD}" resume_id="${3:-}"
   local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
   local max="${MARATHON_MAX_ITERS:-20}"
   local buffer="${MARATHON_BUFFER:-60}"
@@ -147,7 +153,7 @@ run_marathon() {
     stamp=$(date +%Y%m%d-%H%M%S)
     outfile="$logdir/iter-${iter}-${stamp}.log"
 
-    run_iteration "$iter" "$workdir" "$task" "$outfile"
+    run_iteration "$iter" "$workdir" "$task" "$outfile" "$resume_id"
     local code=$?
 
     if [[ -f "$workdir/$sentinel" ]]; then
@@ -201,18 +207,19 @@ xml_escape() {
 # The job runs caffeinate -> claude-marathon, then boots itself out and deletes
 # its own plist, so it does NOT re-run on next login/reboot.
 render_launchd_plist() {
-  local label="$1" task="$2" workdir="$3" logfile="$4" script="$5"
+  local label="$1" task="$2" workdir="$3" logfile="$4" script="$5" resume_id="${6:-}"
   local uid plist
   uid=$(id -u)
   plist="$HOME/Library/LaunchAgents/${label}.plist"
 
-  local e_label e_task e_workdir e_logfile e_script e_plist
+  local e_label e_task e_workdir e_logfile e_script e_plist e_resume
   e_label=$(xml_escape "$label")
   e_task=$(xml_escape "$task")
   e_workdir=$(xml_escape "$workdir")
   e_logfile=$(xml_escape "$logfile")
   e_script=$(xml_escape "$script")
   e_plist=$(xml_escape "$plist")
+  e_resume=$(xml_escape "$resume_id")
 
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -224,12 +231,13 @@ render_launchd_plist() {
   <dict>
     <key>MARATHON_TASK</key><string>${e_task}</string>
     <key>MARATHON_WORKDIR</key><string>${e_workdir}</string>
+    <key>MARATHON_RESUME</key><string>${e_resume}</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>caffeinate -i "${e_script}" "\$MARATHON_TASK" "\$MARATHON_WORKDIR"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null; rm -f "${e_plist}"</string>
+    <string>caffeinate -i "${e_script}" \${MARATHON_RESUME:+--resume "\$MARATHON_RESUME"} "\$MARATHON_TASK" "\$MARATHON_WORKDIR"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null; rm -f "${e_plist}"</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

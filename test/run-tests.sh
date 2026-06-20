@@ -67,6 +67,19 @@ assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "0" "iteration 0: se
 MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
   run_iteration 1 "$ITER_TMP" "Build the thing" "$ITER_TMP/out1.log"
 assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "1" "iteration 1: resume run uses --continue"
+
+# resume id applies on iteration 0
+MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
+  run_iteration 0 "$ITER_TMP" "Continue" "$ITER_TMP/outr0.log" "sess-abc123"
+assert_eq "$(grep -c -- '--resume sess-abc123' "$ITER_TMP/argv.txt")" "1" "iteration 0 + resume id: uses --resume <id>"
+assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "0" "iteration 0 + resume id: no --continue"
+
+# resume id ignored on iteration 1 (still --continue)
+MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
+  run_iteration 1 "$ITER_TMP" "Continue" "$ITER_TMP/outr1.log" "sess-abc123"
+assert_eq "$(grep -c -- '--resume' "$ITER_TMP/argv.txt")" "0" "iteration 1 + resume id: no --resume"
+assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "1" "iteration 1 + resume id: uses --continue"
+
 unset FAKE_CLAUDE_OUT FAKE_CLAUDE_ARGV
 rm -rf "$ITER_TMP"
 
@@ -126,6 +139,7 @@ BIN="$HERE/../claude-marathon"
 chmod +x "$BIN" 2>/dev/null || true
 "$BIN" >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: no args -> usage exit 64"
 assert_eq "$("$BIN" --version)" "claude-marathon 0.1.0" "entrypoint: --version prints version"
+"$BIN" --resume >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: --resume without id -> exit 64"
 
 # --- entrypoint via symlink (finds lib through resolved path) ---
 LINK_TMP=$(mktemp -d)
@@ -147,6 +161,14 @@ assert_eq "$(plutil -extract Label raw "$PLIST_TMP/test.plist" 2>/dev/null)" \
   "com.test.marathon" "render: Label set correctly"
 assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_TASK raw "$PLIST_TMP/test.plist" 2>/dev/null)" \
   "Fix A & B <urgent>" "render: task round-trips through plist unescaped"
+
+# render with a resume id
+render_launchd_plist "com.test.resume" "Continue work" "/tmp/work" \
+  "$PLIST_TMP/r.log" "$HERE/../claude-marathon" "sess-xyz789" > "$PLIST_TMP/r.plist"
+plutil -lint "$PLIST_TMP/r.plist" >/dev/null 2>&1
+assert_eq "$?" "0" "render: plist with resume id passes plutil -lint"
+assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_RESUME raw "$PLIST_TMP/r.plist" 2>/dev/null)" \
+  "sess-xyz789" "render: MARATHON_RESUME set from resume id"
 rm -rf "$PLIST_TMP"
 
 # --- marathon-launchd --dry-run: writes a lint-clean plist, does not load ---
