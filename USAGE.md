@@ -38,6 +38,25 @@ Installs a LaunchAgent that runs detached (survives logout), `caffeinate`-wrappe
 
 Runs in your terminal. Closing the terminal kills it — use 2A for long jobs.
 
+### 2D. Multiple tasks in one night (queue)
+
+Put several tasks in a file, separated by a line containing only `---`. Each
+task runs as its own fresh isolated session, back-to-back.
+
+    cat > night.txt <<'TASKS'
+    Add dark mode to the settings page and test it.
+    ---
+    Fix the failing checkout tests.
+    ---
+    Update the README with both changes.
+    TASKS
+
+    marathon-queue night.txt /path/to/your/repo                 # foreground
+    marathon-launchd --queue night.txt /path/to/your/repo       # detached overnight
+
+By default the queue continues past a failed task; add `--stop-on-fail` to halt
+on the first failure. A summary (done/failed per task) prints at the end.
+
 ### 2C. Continue a specific existing session
 
     claude --resume                  # interactive picker; copy the session id

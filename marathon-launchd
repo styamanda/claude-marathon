@@ -13,43 +13,29 @@ source "$SCRIPT_DIR/marathon-lib.sh"
 
 DRYRUN=0
 RESUME_ID=""
+QUEUE_FILE=""
+STOP_ON_FAIL=""
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --dry-run) DRYRUN=1; shift ;;
     --resume)
       RESUME_ID="${2:-}"
-      if [[ -z "$RESUME_ID" ]]; then
-        echo "error: --resume requires a session id" >&2
-        exit 64
-      fi
-      shift 2
-      ;;
+      [[ -z "$RESUME_ID" ]] && { echo "error: --resume requires a session id" >&2; exit 64; }
+      shift 2 ;;
+    --queue)
+      QUEUE_FILE="${2:-}"
+      [[ -z "$QUEUE_FILE" ]] && { echo "error: --queue requires a file path" >&2; exit 64; }
+      shift 2 ;;
+    --stop-on-fail) STOP_ON_FAIL=1; shift ;;
     *) break ;;
   esac
 done
 
-if [[ $# -lt 1 || -z "${1:-}" ]]; then
-  cat >&2 <<'USAGE'
-Usage: marathon-launchd [--dry-run] [--resume <session-id>] "<task>" [workdir]
-
-Installs a macOS LaunchAgent that runs claude-marathon detached from any
-terminal (survives logout), wrapped in caffeinate so the Mac won't sleep.
-The job self-removes when the task finishes, so it will not re-run on reboot.
-
-  --dry-run        Write the plist and print the load command, but don't load it.
-  --resume <id>    Resume a specific existing session on the first iteration.
-USAGE
-  exit 64
-fi
-
-TASK="$1"
-WORKDIR=$(cd "${2:-$PWD}" && pwd)
 LABEL="com.claude-marathon.$(date +%Y%m%d-%H%M%S)"
 LA_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LA_DIR/$LABEL.plist"
 LOGDIR="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
 LOGFILE="$LOGDIR/$LABEL.log"
-SCRIPT="$SCRIPT_DIR/claude-marathon"
 
 # Resolve claude to an absolute path now (interactive shell has it on PATH).
 # launchd runs the job under a minimal PATH that omits ~/.local/bin, so the
@@ -58,7 +44,43 @@ CLAUDE_BIN=$(command -v claude 2>/dev/null || true)
 [[ -z "$CLAUDE_BIN" ]] && CLAUDE_BIN="claude"
 
 mkdir -p "$LA_DIR" "$LOGDIR"
-render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" "$RESUME_ID" "$CLAUDE_BIN" > "$PLIST"
+
+if [[ -n "$QUEUE_FILE" ]]; then
+  # Queue mode: positional $1 = optional workdir (no task argument).
+  if [[ ! -f "$QUEUE_FILE" ]]; then
+    echo "error: queue file not found: $QUEUE_FILE" >&2
+    exit 66
+  fi
+  QUEUE_FILE=$(cd "$(dirname "$QUEUE_FILE")" && pwd)/$(basename "$QUEUE_FILE")
+  WORKDIR=$(cd "${1:-$PWD}" && pwd)
+  SCRIPT="$SCRIPT_DIR/marathon-queue"
+  render_launchd_queue_plist "$LABEL" "$QUEUE_FILE" "$WORKDIR" "$LOGFILE" "$SCRIPT" "$STOP_ON_FAIL" "$CLAUDE_BIN" > "$PLIST"
+  DESC_KEY="queue:   $QUEUE_FILE"
+else
+  if [[ $# -lt 1 || -z "${1:-}" ]]; then
+    cat >&2 <<'USAGE'
+Usage:
+  marathon-launchd [--dry-run] [--resume <session-id>] "<task>" [workdir]
+  marathon-launchd [--dry-run] --queue <file> [--stop-on-fail] [workdir]
+
+Installs a macOS LaunchAgent that runs detached (survives logout), wrapped in
+caffeinate so the Mac won't sleep. The job self-removes when finished, so it
+will not re-run on reboot.
+
+  --dry-run        Write the plist and print the load command, but don't load it.
+  --resume <id>    Resume a specific existing session on the first iteration.
+  --queue <file>   Run multiple tasks from <file> (separated by lines of `---`),
+                   each as its own fresh isolated session.
+  --stop-on-fail   (queue mode) Halt on the first failing task.
+USAGE
+    exit 64
+  fi
+  TASK="$1"
+  WORKDIR=$(cd "${2:-$PWD}" && pwd)
+  SCRIPT="$SCRIPT_DIR/claude-marathon"
+  render_launchd_plist "$LABEL" "$TASK" "$WORKDIR" "$LOGFILE" "$SCRIPT" "$RESUME_ID" "$CLAUDE_BIN" > "$PLIST"
+  DESC_KEY="task:    $TASK"
+fi
 
 if (( DRYRUN )); then
   echo "Wrote (dry-run): $PLIST"
@@ -68,7 +90,7 @@ fi
 
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "Loaded LaunchAgent: $LABEL"
-echo "  task:    $TASK"
+echo "  $DESC_KEY"
 echo "  workdir: $WORKDIR"
 echo "  log:     $LOGFILE"
 echo "  plist:   $PLIST (self-removes on completion)"

@@ -41,8 +41,10 @@ classify_result() {
     echo "LIMIT $epoch"
     return 0
   fi
-  # (3) phrase present but no machine-readable reset time -> fallback sleep
-  if printf '%s' "$raw" | grep -qiE 'usage (limit|credit limit) reached'; then
+  # (3) a rate/usage/session-limit notification (no machine-readable reset time)
+  #     -> LIMIT unknown, loop will fallback-sleep and retry. Verified real CLI
+  #     message: "You've hit your session limit · resets 8pm (Europe/London)".
+  if printf '%s' "$raw" | grep -qiE "hit your (session|usage|weekly|account) limit|reached your (session|usage|weekly|account) limit|(session|usage|credit|rate)[ -]?limit (reached|exceeded)|usage limit reached"; then
     echo "LIMIT unknown"
     return 0
   fi
@@ -135,12 +137,14 @@ run_iteration() {
   return $?
 }
 
-# run_marathon <task> [workdir] [resume_id] -> 0 done | 1 error | 2 cap reached
+# run_marathon <task> [workdir] [resume_id]
+#   -> 0 done | 1 error | 2 cap reached | 3 gave up still rate-limited
 run_marathon() {
   set +e   # the loop classifies non-zero claude exits (limit/error); never let errexit abort it
   local task="$1" workdir="${2:-$PWD}" resume_id="${3:-}"
   local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
   local max="${MARATHON_MAX_ITERS:-20}"
+  local max_limit_waits="${MARATHON_MAX_LIMIT_WAITS:-48}"
   local buffer="${MARATHON_BUFFER:-60}"
   local fallback="${MARATHON_FALLBACK_SLEEP:-1800}"
   local logdir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
@@ -149,7 +153,7 @@ run_marathon() {
   mkdir -p "$logdir"
   rm -f "$workdir/$sentinel"
 
-  local iter=0
+  local iter=0 limit_waits=0
   while (( iter < max )); do
     local stamp outfile
     stamp=$(date +%Y%m%d-%H%M%S)
@@ -170,11 +174,21 @@ run_marathon() {
 
     case "$verdict" in
       LIMIT*)
+        # A usage/session limit is not progress: sleep and retry WITHOUT
+        # consuming the productive iteration budget. Guard runaway limits
+        # (e.g. exhausted plan) with a separate cap.
+        limit_waits=$((limit_waits + 1))
+        if (( limit_waits > max_limit_waits )); then
+          notify "claude-marathon" "Gave up: still rate-limited after $max_limit_waits waits."
+          echo "GAVE UP: still rate-limited after $max_limit_waits waits. Logs: $logdir"
+          return 3
+        fi
         local epoch secs
         epoch=${verdict#LIMIT }
         secs=$(compute_sleep "$epoch" "$(date +%s)" "$buffer" "$fallback")
-        echo "Usage limit hit; sleeping ${secs}s until reset (iter $iter)."
+        echo "Rate/usage limit hit; sleeping ${secs}s, then retrying (wait ${limit_waits}/${max_limit_waits})."
         "$sleepcmd" "$secs"
+        continue   # do not increment iter — limit waits are free
         ;;
       ERROR*)
         notify "claude-marathon" "Stopped on error: ${verdict#ERROR }"
@@ -185,7 +199,7 @@ run_marathon() {
         : # made progress but not done; keep going
         ;;
     esac
-    ((iter++))
+    iter=$((iter + 1))
   done
 
   notify "claude-marathon" "Stopped: reached max iterations ($max)."
@@ -242,6 +256,113 @@ render_launchd_plist() {
     <string>/bin/bash</string>
     <string>-lc</string>
     <string>caffeinate -i "${e_script}" \${MARATHON_RESUME:+--resume "\$MARATHON_RESUME"} "\$MARATHON_TASK" "\$MARATHON_WORKDIR"; rm -f "${e_plist}"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key><string>${e_logfile}</string>
+  <key>StandardErrorPath</key><string>${e_logfile}</string>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+PLIST
+}
+
+# parse_queue <file> -> task blocks separated by NUL bytes
+# Tasks are separated by a line containing only `---`. Each block is trimmed of
+# surrounding whitespace; empty blocks are skipped. Multi-line tasks supported.
+parse_queue() {
+  awk '
+    function flush(   t) {
+      t = buf; buf = ""
+      sub(/^[[:space:]]+/, "", t)
+      sub(/[[:space:]]+$/, "", t)
+      if (length(t) > 0) printf "%s%c", t, 0
+    }
+    /^[[:space:]]*---[[:space:]]*$/ { flush(); next }
+    { buf = buf $0 "\n" }
+    END { flush() }
+  ' "$1"
+}
+
+# run_marathon_queue <queue_file> [workdir] [stop_on_fail] -> 0 all done | 1 some failed
+# Runs each task as its own fresh isolated marathon (new conversation per task).
+# Continues past failures by default; stop_on_fail=1 halts on the first failure.
+run_marathon_queue() {
+  set +e   # manages its own exit codes; never let a caller's errexit abort it
+  local queue_file="$1" workdir="${2:-$PWD}" stop_on_fail="${3:-0}"
+  local idx=0 done_n=0 fail_n=0 total=0
+  local -a results=()
+  local task rc
+
+  while IFS= read -r -d '' task; do
+    idx=$((idx + 1))
+    echo "===== Queue task ${idx} ====="
+    run_marathon "$task" "$workdir"
+    rc=$?
+    if (( rc == 0 )); then
+      done_n=$((done_n + 1)); results+=("task ${idx}: DONE")
+    else
+      fail_n=$((fail_n + 1)); results+=("task ${idx}: FAILED (rc=${rc})")
+      if [[ "$stop_on_fail" == "1" ]]; then
+        echo "Stopping queue: task ${idx} failed and --stop-on-fail is set."
+        break
+      fi
+    fi
+  done < <(parse_queue "$queue_file")
+
+  total=$((done_n + fail_n))
+  if (( total == 0 )); then
+    echo "Queue is empty — no tasks found in ${queue_file}."
+    notify "claude-marathon queue" "Queue empty: no tasks found."
+    return 0
+  fi
+
+  echo "===== Queue summary ====="
+  local line
+  for line in "${results[@]}"; do
+    echo "  $line"
+  done
+  echo "Completed ${done_n}/${total}, failed ${fail_n}."
+  notify "claude-marathon queue" "Queue: ${done_n}/${total} done, ${fail_n} failed."
+  (( fail_n == 0 ))
+}
+
+# render_launchd_queue_plist <label> <queue_file> <workdir> <logfile> <queue_script> [stop_on_fail] [claude_cmd]
+# Like render_launchd_plist but runs marathon-queue over a queue file.
+render_launchd_queue_plist() {
+  local label="$1" queue_file="$2" workdir="$3" logfile="$4" script="$5" stop_on_fail="${6:-}" claude_cmd="${7:-claude}"
+  local uid plist
+  uid=$(id -u)
+  plist="$HOME/Library/LaunchAgents/${label}.plist"
+
+  local e_label e_queue e_workdir e_logfile e_script e_plist e_stop e_claude
+  e_label=$(xml_escape "$label")
+  e_queue=$(xml_escape "$queue_file")
+  e_workdir=$(xml_escape "$workdir")
+  e_logfile=$(xml_escape "$logfile")
+  e_script=$(xml_escape "$script")
+  e_plist=$(xml_escape "$plist")
+  e_stop=$(xml_escape "$stop_on_fail")
+  e_claude=$(xml_escape "$claude_cmd")
+
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${e_label}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MARATHON_QUEUE</key><string>${e_queue}</string>
+    <key>MARATHON_WORKDIR</key><string>${e_workdir}</string>
+    <key>MARATHON_STOP_ON_FAIL</key><string>${e_stop}</string>
+    <key>MARATHON_CLAUDE_CMD</key><string>${e_claude}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>caffeinate -i "${e_script}" \${MARATHON_STOP_ON_FAIL:+--stop-on-fail} "\$MARATHON_QUEUE" "\$MARATHON_WORKDIR"; rm -f "${e_plist}"; /bin/launchctl bootout gui/${uid}/${e_label} 2>/dev/null</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

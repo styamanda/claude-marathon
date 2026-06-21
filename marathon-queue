@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -uo pipefail
+# Resolve symlinks so the lib is found when invoked via a symlink on PATH.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+# shellcheck source=marathon-lib.sh
+source "$SCRIPT_DIR/marathon-lib.sh"
+
+case "${1:-}" in
+  -v|--version) marathon_version; exit 0 ;;
+esac
+
+STOP_ON_FAIL=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --stop-on-fail) STOP_ON_FAIL=1; shift ;;
+    *) break ;;
+  esac
+done
+
+if [[ $# -lt 1 || -z "${1:-}" ]]; then
+  cat >&2 <<'USAGE'
+Usage: marathon-queue [--stop-on-fail] <queue-file> [workdir]
+
+Runs multiple tasks back-to-back, each as its own fresh isolated session,
+sleeping through usage-limit resets. Tasks in <queue-file> are separated by a
+line containing only `---`. By default the queue continues past a failed task;
+--stop-on-fail halts on the first failure.
+USAGE
+  exit 64
+fi
+
+QUEUE_FILE="$1"
+if [[ ! -f "$QUEUE_FILE" ]]; then
+  echo "error: queue file not found: $QUEUE_FILE" >&2
+  exit 66
+fi
+WORKDIR="${2:-$PWD}"
+
+run_marathon_queue "$QUEUE_FILE" "$WORKDIR" "$STOP_ON_FAIL"

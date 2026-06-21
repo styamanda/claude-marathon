@@ -30,6 +30,8 @@ assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit_resetsat.json")" 0)" \
   "LIMIT 1750464000" "classify: resetsAt field (CLI v2.1.x) -> LIMIT epoch"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit_text.json")" 0)" \
   "LIMIT unknown" "classify: bare 'usage limit reached' phrase -> LIMIT unknown"
+assert_eq "$(classify_result "$(cat "$HERE/fixtures/session-limit.json")" 0)" \
+  "LIMIT unknown" "classify: real 'hit your session limit' message -> LIMIT unknown"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/success.json")" 0)" \
   "OK" "classify: clean success -> OK"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/error.json")" 0)" \
@@ -132,6 +134,40 @@ OUT3=$(MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
        run_marathon "broken" "$ERR_TMP/work"); RC3=$?
 assert_eq "$RC3" "1" "marathon: returns 1 on hard error"
 
+# --- run_marathon: limit waits do NOT consume the productive iteration budget ---
+LW_TMP=$(mktemp -d); mkdir -p "$LW_TMP/work" "$LW_TMP/logs"
+cat > "$LW_TMP/fake.sh" <<'EOF'
+#!/usr/bin/env bash
+N_FILE="LWDIR/n"
+n=$(cat "$N_FILE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$N_FILE"
+if (( n <= 4 )); then
+  echo '{"is_error":true,"result":"You'"'"'ve hit your session limit · resets 8pm (Europe/London)"}'
+else
+  : > "LWDIR/work/.marathon-done"; echo '{"is_error":false,"result":"done"}'
+fi
+EOF
+sed -i.bak "s#LWDIR#$LW_TMP#g" "$LW_TMP/fake.sh"; chmod +x "$LW_TMP/fake.sh"
+LW_OUT=$(MARATHON_CLAUDE_CMD="$LW_TMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$LW_TMP/logs" MARATHON_MAX_ITERS=2 MARATHON_MAX_LIMIT_WAITS=10 \
+  run_marathon "x" "$LW_TMP/work"); LW_RC=$?
+assert_eq "$LW_RC" "0" "marathon: completes despite 4 limit waits under MAX_ITERS=2 (waits are free)"
+assert_eq "$(cat "$LW_TMP/n")" "5" "marathon: ran all 5 claude calls (4 limits + 1 done)"
+rm -rf "$LW_TMP"
+
+# --- run_marathon: gives up (rc 3) if rate-limited beyond MAX_LIMIT_WAITS ---
+PL_TMP=$(mktemp -d); mkdir -p "$PL_TMP/work" "$PL_TMP/logs"
+cat > "$PL_TMP/fake.sh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"is_error":true,"result":"You'"'"'ve hit your session limit · resets 8pm"}'
+EOF
+chmod +x "$PL_TMP/fake.sh"
+PL_OUT=$(MARATHON_CLAUDE_CMD="$PL_TMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$PL_TMP/logs" MARATHON_MAX_ITERS=5 MARATHON_MAX_LIMIT_WAITS=2 \
+  run_marathon "x" "$PL_TMP/work"); PL_RC=$?
+assert_eq "$PL_RC" "3" "marathon: persistent limit -> rc 3 (gave up)"
+assert_eq "$(echo "$PL_OUT" | grep -c 'GAVE UP')" "1" "marathon: persistent limit prints GAVE UP"
+rm -rf "$PL_TMP"
+
 # --- run_marathon: survives a caller's set -e when claude exits non-zero ---
 # Regression: launchd job used `set -e`, so a failing/limit claude aborted the
 # loop instead of being classified. run_marathon must neutralize errexit itself.
@@ -151,6 +187,64 @@ assert_eq "$(echo "$SETE_OUT" | grep -c 'ERROR stop')" "1" "marathon: under set 
 rm -rf "$SETE_TMP"
 
 rm -rf "$LOOP_TMP" "$CAP_TMP" "$ERR_TMP"
+
+# --- parse_queue ---
+QF="$HERE/fixtures/queue-sample.txt"
+assert_eq "$(parse_queue "$QF" | tr -cd '\0' | wc -c | tr -d ' ')" "3" "parse_queue: 3 tasks from sample"
+T2=$(parse_queue "$QF" | { i=0; while IFS= read -r -d '' t; do i=$((i+1)); [[ $i -eq 2 ]] && printf '%s' "$t"; done; })
+assert_eq "$T2" "$(printf 'Task two\nhas two lines')" "parse_queue: multi-line task preserved"
+
+# --- run_marathon_queue ---
+QTMP=$(mktemp -d); mkdir -p "$QTMP/work" "$QTMP/logs"
+cat > "$QTMP/fake.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *GOOD*) : > .marathon-done; echo '{"is_error":false,"result":"ok"}' ;;
+  *)      echo '{"is_error":true,"result":"deliberate failure"}' ;;
+esac
+EOF
+chmod +x "$QTMP/fake.sh"
+
+printf 'GOOD first\n---\nGOOD second\n' > "$QTMP/all-good.txt"
+QOUT=$(MARATHON_CLAUDE_CMD="$QTMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$QTMP/logs" MARATHON_MAX_ITERS=3 \
+  run_marathon_queue "$QTMP/all-good.txt" "$QTMP/work"); QRC=$?
+assert_eq "$QRC" "0" "queue: all-good -> rc 0"
+assert_eq "$(echo "$QOUT" | grep -cE 'task [0-9]+: DONE')" "2" "queue: both tasks DONE"
+
+printf 'BAD one\n---\nGOOD two\n' > "$QTMP/mixed.txt"
+QOUT2=$(MARATHON_CLAUDE_CMD="$QTMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$QTMP/logs" MARATHON_MAX_ITERS=3 \
+  run_marathon_queue "$QTMP/mixed.txt" "$QTMP/work"); QRC2=$?
+assert_eq "$QRC2" "1" "queue: a failure makes overall rc nonzero"
+assert_eq "$(echo "$QOUT2" | grep -c 'FAILED')" "1" "queue: continues past failure (1 failed)"
+assert_eq "$(echo "$QOUT2" | grep -c 'task 2: DONE')" "1" "queue: ran task 2 after task 1 failed"
+
+QOUT3=$(MARATHON_CLAUDE_CMD="$QTMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$QTMP/logs" MARATHON_MAX_ITERS=3 \
+  run_marathon_queue "$QTMP/mixed.txt" "$QTMP/work" 1); QRC3=$?
+assert_eq "$QRC3" "1" "queue: stop-on-fail -> rc 1"
+assert_eq "$(echo "$QOUT3" | grep -c 'Queue task 2')" "0" "queue: stop-on-fail did not start task 2"
+rm -rf "$QTMP"
+
+# --- render_launchd_queue_plist ---
+QP_TMP=$(mktemp -d)
+render_launchd_queue_plist "com.test.q" "/tmp/tasks.txt" "/tmp/work" "$QP_TMP/q.log" \
+  "$HERE/../marathon-queue" "1" "/abs/bin/claude" > "$QP_TMP/q.plist"
+plutil -lint "$QP_TMP/q.plist" >/dev/null 2>&1
+assert_eq "$?" "0" "render-queue: plist passes plutil -lint"
+assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_QUEUE raw "$QP_TMP/q.plist" 2>/dev/null)" \
+  "/tmp/tasks.txt" "render-queue: MARATHON_QUEUE set"
+assert_eq "$(plutil -extract EnvironmentVariables.MARATHON_CLAUDE_CMD raw "$QP_TMP/q.plist" 2>/dev/null)" \
+  "/abs/bin/claude" "render-queue: claude cmd set"
+rm -rf "$QP_TMP"
+
+# --- marathon-queue entrypoint ---
+QBIN="$HERE/../marathon-queue"
+chmod +x "$QBIN" 2>/dev/null || true
+"$QBIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-queue: no args -> 64"
+"$QBIN" /nonexistent/queue/file >/dev/null 2>&1; assert_eq "$?" "66" "marathon-queue: missing file -> 66"
+assert_eq "$("$QBIN" --version)" "claude-marathon 0.1.0" "marathon-queue: --version"
 
 # --- entrypoint ---
 BIN="$HERE/../claude-marathon"
@@ -220,6 +314,18 @@ DRY_CC=$(plutil -extract EnvironmentVariables.MARATHON_CLAUDE_CMD raw "$DRY_PLIS
 case "$DRY_CC" in /*) DRY_ABS=yes;; *) DRY_ABS=no;; esac
 assert_eq "$DRY_ABS" "yes" "marathon-launchd: bakes absolute claude path (PATH-independent)"
 rm -f "$DRY_PLIST"; rm -rf "$DRY_TMP"
+
+# marathon-launchd queue mode --dry-run
+LQ_TMP=$(mktemp -d); printf 'a\n---\nb\n' > "$LQ_TMP/q.txt"
+LQ_OUT=$(MARATHON_LOG_DIR="$LQ_TMP/logs" "$LAUNCHD_BIN" --dry-run --queue "$LQ_TMP/q.txt" "$LQ_TMP")
+assert_eq "$?" "0" "marathon-launchd: --queue --dry-run exits 0"
+LQ_PLIST=$(echo "$LQ_OUT" | sed -n 's/^Wrote (dry-run): //p')
+plutil -lint "$LQ_PLIST" >/dev/null 2>&1
+assert_eq "$?" "0" "marathon-launchd: --queue plist passes plutil -lint"
+LQ_Q=$(plutil -extract EnvironmentVariables.MARATHON_QUEUE raw "$LQ_PLIST" 2>/dev/null)
+case "$LQ_Q" in */q.txt) QOK=yes;; *) QOK=no;; esac
+assert_eq "$QOK" "yes" "marathon-launchd: --queue sets MARATHON_QUEUE to the file"
+rm -f "$LQ_PLIST"; rm -rf "$LQ_TMP"
 
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

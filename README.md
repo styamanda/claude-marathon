@@ -78,18 +78,29 @@ early with the `launchctl bootout ...` command printed at install time.
 
 ## Usage-limit detection
 
-Verified against Claude Code CLI **v2.1.183**. Limit detection accepts three
-signals, most precise first:
+Verified against a **real** Claude Code CLI v2.1.183 limit. The headless result
+during a session limit looks like:
 
-1. **`resetsAt`** — a JSON field carrying the reset time as Unix epoch seconds
-   (the CLI derives it from the `anthropic-ratelimit-unified-reset` response
-   header). Used to sleep exactly until reset.
+    {"is_error":true,"result":"You've hit your session limit · resets 8pm (Europe/London)"}
+
+There is no machine-readable reset epoch in that payload, so detection works by
+matching the message text and the loop then **fallback-sleeps and retries**
+until the limit clears. Detection accepts, most precise first:
+
+1. **`resetsAt`** — a JSON epoch field, if present → sleep exactly until reset.
 2. Legacy `usage limit reached|<epoch>` pipe-delimited text (older builds).
-3. The bare phrase `usage limit reached` with no machine-readable time — the
-   loop falls back to `MARATHON_FALLBACK_SLEEP` (default 30 min) and retries.
+3. The phrasing `hit your session/usage limit`, `... limit reached/exceeded`,
+   etc. with no epoch → fallback-sleep (`MARATHON_FALLBACK_SLEEP`, default
+   30 min) and retry.
 
-The exact shape of the headless `--print --output-format json` payload during a
-real limit could not be triggered on demand; signal (3) guarantees the loop
-keeps working even if the payload omits `resetsAt`. On your first genuine limit
-hit, check the log: a "sleeping Ns until reset" line with N in the thousands
-means `resetsAt` was found; repeated 1800s sleeps mean it fell back to (3).
+Limit waits do **not** consume the iteration budget (`MARATHON_MAX_ITERS`); a
+separate `MARATHON_MAX_LIMIT_WAITS` (default 48) bounds how long it will keep
+retrying a persistent limit before giving up (exit code 3). On a real limit the
+log shows `Rate/usage limit hit; sleeping Ns, then retrying (wait k/48)`.
+
+## Multiple tasks (queue)
+
+`marathon-queue <file> [workdir]` runs several tasks back-to-back, each as its
+own fresh isolated session. Tasks in the file are separated by a line containing
+only `---`. Continues past failures by default; `--stop-on-fail` halts on the
+first. Run it detached overnight via `marathon-launchd --queue <file> [workdir]`.
