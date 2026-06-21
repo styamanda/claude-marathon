@@ -4,7 +4,8 @@
 
 : "${MARATHON_MAX_ITERS:=20}"
 : "${MARATHON_TIMEOUT:=7200}"
-: "${MARATHON_FALLBACK_SLEEP:=1800}"
+: "${MARATHON_FALLBACK_SLEEP:=300}"
+: "${MARATHON_MAX_LIMIT_WAITS:=96}"
 : "${MARATHON_BUFFER:=60}"
 : "${MARATHON_SENTINEL:=.marathon-done}"
 : "${MARATHON_LOG_DIR:=$HOME/.claude/marathon-logs}"
@@ -16,12 +17,13 @@ marathon_version() {
   echo "claude-marathon 0.1.0"
 }
 
-# parse_reset_epoch <raw> -> Unix epoch of the reset time, or rc 1 if not found.
+# parse_reset_epoch <raw> -> Unix epoch of TODAY's reset time, or rc 1 if absent.
 # Parses human reset times like "resets 4:20am (Europe/London)" / "resets 8pm".
-# Uses the timezone in parentheses if present, else the local zone. If the parsed
-# time already passed (more than a 2-min grace), assumes it means the next day.
+# Uses the timezone in parentheses if present, else the local zone. Returns the
+# epoch for the parsed clock time on today's date (which may be in the past);
+# the caller decides whether to trust it (only used when clearly in the future).
 parse_reset_epoch() {
-  local raw="$1" low tstr ap hm norm tz today epoch now
+  local raw="$1" low tstr ap hm norm tz today epoch
   low=$(printf '%s' "$raw" | tr 'A-Z' 'a-z')
   tstr=$(printf '%s' "$low" | grep -oE 'reset[s]?( at)? [0-9]{1,2}(:[0-9]{2})?(am|pm)' | head -1 \
          | grep -oE '[0-9]{1,2}(:[0-9]{2})?(am|pm)')
@@ -35,8 +37,6 @@ parse_reset_epoch() {
   today=$(TZ="$tz" date "+%Y-%m-%d")
   epoch=$(TZ="$tz" date -j -f "%Y-%m-%d %I:%M%p" "$today $norm" "+%s" 2>/dev/null)
   [[ -z "$epoch" ]] && return 1
-  now=$(date +%s)
-  (( epoch < now - 120 )) && epoch=$((epoch + 86400))
   printf '%s' "$epoch"
 }
 
@@ -69,9 +69,12 @@ classify_result() {
   #     "You've hit your session limit · resets 8pm (Europe/London)".
   #     Try to parse the human reset time for a precise sleep; else fallback.
   if printf '%s' "$raw" | grep -qiE "hit your (session|usage|weekly|account) limit|reached your (session|usage|weekly|account) limit|(session|usage|credit|rate)[ -]?limit (reached|exceeded)|usage limit reached"; then
-    local reset_epoch
+    # Use a parsed reset time only when it is clearly in the future; otherwise
+    # (stale/just-passed/ambiguous) report unknown so the loop short-polls.
+    local reset_epoch now
     reset_epoch=$(parse_reset_epoch "$raw")
-    if [[ -n "$reset_epoch" ]]; then
+    now=$(date +%s)
+    if [[ -n "$reset_epoch" ]] && (( reset_epoch > now + 60 )); then
       echo "LIMIT $reset_epoch"
     else
       echo "LIMIT unknown"
@@ -174,9 +177,9 @@ run_marathon() {
   local task="$1" workdir="${2:-$PWD}" resume_id="${3:-}"
   local sentinel="${MARATHON_SENTINEL:-.marathon-done}"
   local max="${MARATHON_MAX_ITERS:-20}"
-  local max_limit_waits="${MARATHON_MAX_LIMIT_WAITS:-48}"
+  local max_limit_waits="${MARATHON_MAX_LIMIT_WAITS:-96}"
   local buffer="${MARATHON_BUFFER:-60}"
-  local fallback="${MARATHON_FALLBACK_SLEEP:-1800}"
+  local fallback="${MARATHON_FALLBACK_SLEEP:-300}"
   local logdir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
   local sleepcmd="${MARATHON_SLEEP_CMD:-sleep}"
 
