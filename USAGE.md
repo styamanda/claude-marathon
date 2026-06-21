@@ -98,6 +98,20 @@ Review the work:
     git status && git diff
     git log --oneline
 
+## One marathon per directory
+
+Two marathons in the **same** directory collide (they share the conversation and
+the `.marathon-done` file). The tool now prevents this automatically: a running
+marathon holds a lock on its workdir, and a second one targeting the same
+directory refuses to start:
+
+    error: a marathon is already running for /path/to/repo.
+
+Different directories can run in parallel safely. To run something else in the
+same repo, stop the current job first (see below). Locks live in
+`~/.claude/marathon-locks/` and are reclaimed automatically if a job crashed
+(stale lock from a dead process). To clear one by hand: `rm -rf ~/.claude/marathon-locks/`.
+
 ## 6. Stop a job early
 
     launchctl bootout gui/$(id -u)/<label>     # label is printed at launch / is the log filename

@@ -342,6 +342,30 @@ case "$LQ_Q" in */q.txt) QOK=yes;; *) QOK=no;; esac
 assert_eq "$QOK" "yes" "marathon-launchd: --queue sets MARATHON_QUEUE to the file"
 rm -f "$LQ_PLIST"; rm -rf "$LQ_TMP"
 
+# --- workdir locking (one marathon per directory) ---
+LK_DIR=$(mktemp -d); LK_WD=$(mktemp -d)
+export MARATHON_LOCK_DIR="$LK_DIR"
+acquire_lock "$LK_WD"; assert_eq "$?" "0" "lock: acquire succeeds when free"
+lock_held "$LK_WD"; assert_eq "$?" "0" "lock: held after acquire"
+acquire_lock "$LK_WD"; assert_eq "$?" "1" "lock: second acquire (live holder) refused"
+release_lock "$LK_WD"; lock_held "$LK_WD"; assert_eq "$?" "1" "lock: released -> not held"
+LK_LP=$(marathon_lock_path "$LK_WD"); mkdir -p "$LK_LP"; echo 999999 > "$LK_LP/pid"
+acquire_lock "$LK_WD"; assert_eq "$?" "0" "lock: stale lock (dead pid) reclaimed"
+release_lock "$LK_WD"
+unset MARATHON_LOCK_DIR
+rm -rf "$LK_DIR" "$LK_WD"
+
+# entrypoints refuse when the workdir lock is held by another live process
+EL_DIR=$(mktemp -d); EL_WD=$(mktemp -d)
+sleep 60 & EL_BG=$!
+EL_LP=$(MARATHON_LOCK_DIR="$EL_DIR" marathon_lock_path "$EL_WD"); mkdir -p "$EL_LP"; echo "$EL_BG" > "$EL_LP/pid"
+MARATHON_LOCK_DIR="$EL_DIR" MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" "$BIN" "do x" "$EL_WD" >/dev/null 2>&1
+assert_eq "$?" "65" "claude-marathon: refuses (exit 65) when workdir lock held"
+MARATHON_LOCK_DIR="$EL_DIR" "$LAUNCHD_BIN" "do x" "$EL_WD" >/dev/null 2>&1
+assert_eq "$?" "65" "marathon-launchd: refuses (exit 65) when workdir lock held"
+kill "$EL_BG" 2>/dev/null
+rm -rf "$EL_DIR" "$EL_WD"
+
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 (( FAIL == 0 ))

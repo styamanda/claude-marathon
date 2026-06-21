@@ -40,6 +40,12 @@ if [[ ! -f "$QUEUE_FILE" ]]; then
   echo "error: queue file not found: $QUEUE_FILE" >&2
   exit 66
 fi
-WORKDIR="${2:-$PWD}"
+WORKDIR=$(cd "${2:-$PWD}" && pwd)
+if ! acquire_lock "$WORKDIR"; then
+  echo "error: a marathon is already running for $WORKDIR." >&2
+  echo "Stop it first, or target a different directory. (one marathon per directory)" >&2
+  exit 65
+fi
+trap 'release_lock "$WORKDIR"' EXIT INT TERM
 
 run_marathon_queue "$QUEUE_FILE" "$WORKDIR" "$STOP_ON_FAIL"

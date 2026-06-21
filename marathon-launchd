@@ -88,6 +88,14 @@ if (( DRYRUN )); then
   exit 0
 fi
 
+if lock_held "$WORKDIR"; then
+  rm -f "$PLIST"
+  echo "error: a marathon is already running for $WORKDIR." >&2
+  echo "Stop it first:  launchctl bootout gui/$(id -u)/<its-label>   (see ~/.claude/marathon-logs)" >&2
+  echo "Or target a different directory. (one marathon per directory)" >&2
+  exit 65
+fi
+
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "Loaded LaunchAgent: $LABEL"
 echo "  $DESC_KEY"

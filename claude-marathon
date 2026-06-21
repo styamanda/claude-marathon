@@ -41,4 +41,12 @@ USAGE
   exit 64
 fi
 
-run_marathon "$1" "${2:-$PWD}" "$RESUME_ID"
+WORKDIR=$(cd "${2:-$PWD}" && pwd)
+if ! acquire_lock "$WORKDIR"; then
+  echo "error: a marathon is already running for $WORKDIR." >&2
+  echo "Stop it first, or target a different directory. (one marathon per directory)" >&2
+  exit 65
+fi
+trap 'release_lock "$WORKDIR"' EXIT INT TERM
+
+run_marathon "$1" "$WORKDIR" "$RESUME_ID"

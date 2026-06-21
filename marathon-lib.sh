@@ -12,9 +12,53 @@
 : "${MARATHON_CLAUDE_CMD:=claude}"
 : "${MARATHON_SLEEP_CMD:=sleep}"
 : "${MARATHON_NOTIFY:=auto}"
+: "${MARATHON_LOCK_DIR:=$HOME/.claude/marathon-locks}"
 
 marathon_version() {
   echo "claude-marathon 0.1.0"
+}
+
+# marathon_lock_path <workdir> -> lock directory path for that workdir
+marathon_lock_path() {
+  local key
+  key=$(printf '%s' "$1" | sed 's#[^A-Za-z0-9]#_#g')
+  printf '%s/%s.lock' "${MARATHON_LOCK_DIR:-$HOME/.claude/marathon-locks}" "$key"
+}
+
+# lock_held <workdir> -> 0 if a LIVE marathon currently holds this workdir's lock
+lock_held() {
+  local lock holder
+  lock=$(marathon_lock_path "$1")
+  holder=$(cat "$lock/pid" 2>/dev/null)
+  [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null
+}
+
+# acquire_lock <workdir> -> 0 acquired, 1 already held by a live process.
+# Uses mkdir as the atomic primitive; reclaims a stale lock whose holder died.
+acquire_lock() {
+  local lock holder
+  lock=$(marathon_lock_path "$1")
+  mkdir -p "$(dirname "$lock")"
+  if mkdir "$lock" 2>/dev/null; then
+    echo $$ > "$lock/pid"
+    return 0
+  fi
+  holder=$(cat "$lock/pid" 2>/dev/null)
+  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    return 1
+  fi
+  # stale lock — reclaim it
+  echo $$ > "$lock/pid"
+  return 0
+}
+
+# release_lock <workdir> -> removes the lock only if this process owns it
+release_lock() {
+  local lock holder
+  lock=$(marathon_lock_path "$1")
+  holder=$(cat "$lock/pid" 2>/dev/null)
+  [[ "$holder" == "$$" ]] && rm -rf "$lock"
+  return 0
 }
 
 # parse_reset_epoch <raw> -> Unix epoch of TODAY's reset time, or rc 1 if absent.
