@@ -16,6 +16,30 @@ marathon_version() {
   echo "claude-marathon 0.1.0"
 }
 
+# parse_reset_epoch <raw> -> Unix epoch of the reset time, or rc 1 if not found.
+# Parses human reset times like "resets 4:20am (Europe/London)" / "resets 8pm".
+# Uses the timezone in parentheses if present, else the local zone. If the parsed
+# time already passed (more than a 2-min grace), assumes it means the next day.
+parse_reset_epoch() {
+  local raw="$1" low tstr ap hm norm tz today epoch now
+  low=$(printf '%s' "$raw" | tr 'A-Z' 'a-z')
+  tstr=$(printf '%s' "$low" | grep -oE 'reset[s]?( at)? [0-9]{1,2}(:[0-9]{2})?(am|pm)' | head -1 \
+         | grep -oE '[0-9]{1,2}(:[0-9]{2})?(am|pm)')
+  [[ -z "$tstr" ]] && return 1
+  ap=$(printf '%s' "$tstr" | grep -oE '(am|pm)$')
+  hm=${tstr%$ap}
+  [[ "$hm" != *:* ]] && hm="${hm}:00"
+  norm="${hm}$(printf '%s' "$ap" | tr 'a-z' 'A-Z')"   # e.g. 4:20AM
+  tz=$(printf '%s' "$raw" | grep -oE '\([A-Za-z]+/[A-Za-z_]+\)' | head -1 | tr -d '()')
+  [[ -z "$tz" ]] && tz="$(date +%Z)"
+  today=$(TZ="$tz" date "+%Y-%m-%d")
+  epoch=$(TZ="$tz" date -j -f "%Y-%m-%d %I:%M%p" "$today $norm" "+%s" 2>/dev/null)
+  [[ -z "$epoch" ]] && return 1
+  now=$(date +%s)
+  (( epoch < now - 120 )) && epoch=$((epoch + 86400))
+  printf '%s' "$epoch"
+}
+
 # classify_result <raw_output> <exit_code> -> "OK" | "LIMIT <epoch|unknown>" | "ERROR <msg>"
 #
 # Usage-limit detection for Claude Code (verified against CLI v2.1.183):
@@ -41,11 +65,17 @@ classify_result() {
     echo "LIMIT $epoch"
     return 0
   fi
-  # (3) a rate/usage/session-limit notification (no machine-readable reset time)
-  #     -> LIMIT unknown, loop will fallback-sleep and retry. Verified real CLI
-  #     message: "You've hit your session limit · resets 8pm (Europe/London)".
+  # (3) a rate/usage/session-limit notification. Verified real CLI message:
+  #     "You've hit your session limit · resets 8pm (Europe/London)".
+  #     Try to parse the human reset time for a precise sleep; else fallback.
   if printf '%s' "$raw" | grep -qiE "hit your (session|usage|weekly|account) limit|reached your (session|usage|weekly|account) limit|(session|usage|credit|rate)[ -]?limit (reached|exceeded)|usage limit reached"; then
-    echo "LIMIT unknown"
+    local reset_epoch
+    reset_epoch=$(parse_reset_epoch "$raw")
+    if [[ -n "$reset_epoch" ]]; then
+      echo "LIMIT $reset_epoch"
+    else
+      echo "LIMIT unknown"
+    fi
     return 0
   fi
 

@@ -30,8 +30,19 @@ assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit_resetsat.json")" 0)" \
   "LIMIT 1750464000" "classify: resetsAt field (CLI v2.1.x) -> LIMIT epoch"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit_text.json")" 0)" \
   "LIMIT unknown" "classify: bare 'usage limit reached' phrase -> LIMIT unknown"
-assert_eq "$(classify_result "$(cat "$HERE/fixtures/session-limit.json")" 0)" \
-  "LIMIT unknown" "classify: real 'hit your session limit' message -> LIMIT unknown"
+# parse_reset_epoch: human reset times -> epoch (verify by converting back)
+E1=$(parse_reset_epoch "You've hit your session limit · resets 4:20am (Europe/London)")
+assert_eq "$(TZ=Europe/London date -r "$E1" +%H:%M)" "04:20" "parse_reset_epoch: 4:20am London"
+E2=$(parse_reset_epoch "resets 8pm (Europe/London)")
+assert_eq "$(TZ=Europe/London date -r "$E2" +%H:%M)" "20:00" "parse_reset_epoch: 8pm London"
+parse_reset_epoch "no reset time here" >/dev/null; assert_eq "$?" "1" "parse_reset_epoch: no time -> rc 1"
+
+# classify: real session-limit message now yields LIMIT <epoch> with parsed reset
+SL_VERDICT=$(classify_result "$(cat "$HERE/fixtures/session-limit.json")" 0)
+case "$SL_VERDICT" in "LIMIT "[0-9]*) SL_OK=yes;; *) SL_OK=no;; esac
+assert_eq "$SL_OK" "yes" "classify: real session-limit -> LIMIT <epoch>"
+assert_eq "$(TZ=Europe/London date -r "${SL_VERDICT#LIMIT }" +%H:%M)" "20:00" \
+  "classify: parsed reset epoch = 20:00 London"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/success.json")" 0)" \
   "OK" "classify: clean success -> OK"
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/error.json")" 0)" \
