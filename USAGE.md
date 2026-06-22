@@ -136,7 +136,7 @@ For a foreground run: `Ctrl-C`.
 |-----|---------|---------|
 | `MARATHON_MAX_ITERS` | 20 | Max loop iterations before giving up |
 | `MARATHON_TIMEOUT` | 7200 | Per-run timeout (seconds) |
-| `MARATHON_FALLBACK_SLEEP` | 1800 | Sleep when reset time isn't parseable |
+| `MARATHON_FALLBACK_SLEEP` | 300 | Sleep when reset time isn't parseable (short-poll) |
 | `MARATHON_BUFFER` | 60 | Extra seconds added after a reset |
 | `MARATHON_LOG_DIR` | `~/.claude/marathon-logs` | Where logs go |
 | `MARATHON_SENTINEL` | `.marathon-done` | Completion sentinel filename |

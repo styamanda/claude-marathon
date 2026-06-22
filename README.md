@@ -4,6 +4,35 @@ Run a long Claude Code task unattended across usage-limit resets. When Claude
 hits its limit, the wrapper parses the reset time, sleeps until then, and
 resumes the same conversation — looping until the task is done.
 
+## Install
+
+macOS, with the `claude` CLI on your PATH, plus `jq`. (The foreground
+`claude-marathon` and the queue work on any Unix; only the detached
+`marathon-launchd` and the `--watch` log window are macOS-specific.)
+
+    # 1. Clone
+    git clone https://github.com/styamanda/claude-marathon.git ~/Projects/claude-marathon
+    cd ~/Projects/claude-marathon
+
+    # 2. Make the scripts runnable
+    chmod +x claude-marathon marathon-launchd marathon-queue
+
+    # 3. Put them on your PATH (symlinks, so `git pull` updates them in place)
+    mkdir -p ~/.local/bin
+    ln -sf "$PWD/claude-marathon"  ~/.local/bin/
+    ln -sf "$PWD/marathon-launchd" ~/.local/bin/
+    ln -sf "$PWD/marathon-queue"   ~/.local/bin/
+
+    # 4. Verify (ensure ~/.local/bin is on your PATH)
+    claude-marathon --version          # -> claude-marathon 0.1.0
+
+Update later with `git -C ~/Projects/claude-marathon pull`; the symlinks pick up
+the new version automatically.
+
+> Always use **straight** quotes (`"`) around the task. Curly quotes (`“ ”`)
+> pasted from a notes app or editor are not treated as quoting by the shell; the
+> tool detects them and refuses with a clear error rather than mangling the task.
+
 ## Why a script (not a slash command)
 
 While Claude Code is rate-limited, it cannot run. The orchestrator must live
@@ -48,6 +77,11 @@ Inspect the plist before loading:
 
     ./marathon-launchd --dry-run "..." /path/to/repo
 
+A desktop notification fires the moment a job loads so you know it started. To
+watch it work live, add `--watch` — it opens a Terminal window tailing the log:
+
+    ./marathon-launchd --watch "..." /path/to/repo
+
 The task text is passed through the plist's `EnvironmentVariables`, never
 shell-interpolated, so quotes and special characters in the task are safe.
 Logs and the plist are labelled `com.claude-marathon.<timestamp>`. Stop a run
@@ -66,7 +100,7 @@ early with the `launchctl bootout ...` command printed at install time.
 |-----|---------|---------|
 | `MARATHON_MAX_ITERS` | 20 | Hard cap on loop iterations |
 | `MARATHON_TIMEOUT` | 7200 | Per-run timeout (seconds) |
-| `MARATHON_FALLBACK_SLEEP` | 1800 | Sleep when reset time can't be parsed |
+| `MARATHON_FALLBACK_SLEEP` | 300 | Sleep when reset time can't be parsed (short-poll) |
 | `MARATHON_BUFFER` | 60 | Extra seconds added after reset |
 | `MARATHON_LOG_DIR` | `~/.claude/marathon-logs` | Per-iteration logs |
 | `MARATHON_SENTINEL` | `.marathon-done` | Completion sentinel filename |
@@ -91,12 +125,12 @@ until the limit clears. Detection accepts, most precise first:
 2. Legacy `usage limit reached|<epoch>` pipe-delimited text (older builds).
 3. The phrasing `hit your session/usage limit`, `... limit reached/exceeded`,
    etc. with no epoch → fallback-sleep (`MARATHON_FALLBACK_SLEEP`, default
-   30 min) and retry.
+   5 min) and short-poll until the limit clears.
 
 Limit waits do **not** consume the iteration budget (`MARATHON_MAX_ITERS`); a
-separate `MARATHON_MAX_LIMIT_WAITS` (default 48) bounds how long it will keep
+separate `MARATHON_MAX_LIMIT_WAITS` (default 96) bounds how long it will keep
 retrying a persistent limit before giving up (exit code 3). On a real limit the
-log shows `Rate/usage limit hit; sleeping Ns, then retrying (wait k/48)`.
+log shows `Rate/usage limit hit; sleeping Ns, then retrying (wait k/96)`.
 
 ## Multiple tasks (queue)
 
