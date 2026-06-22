@@ -56,6 +56,16 @@ assert_eq "$(classify_result "$(cat "$HERE/fixtures/malformed.txt")" 0)" \
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/malformed.txt")" 7)" \
   "ERROR exit_code=7" "classify: malformed + nonzero exit -> ERROR"
 
+# --- contains_smart_quotes ---
+contains_smart_quotes "“Continue where we left off“"; assert_eq "$?" "0" "smart_quotes: curly double -> detected"
+contains_smart_quotes "it’s broken"; assert_eq "$?" "0" "smart_quotes: curly single -> detected"
+contains_smart_quotes "\"Refactor the auth module\""; assert_eq "$?" "1" "smart_quotes: straight quotes -> clean"
+contains_smart_quotes "plain text no quotes"; assert_eq "$?" "1" "smart_quotes: no quotes -> clean"
+
+# --- entrypoints reject smart quotes with a clear error (exit 64) ---
+"$HERE/../marathon-launchd" "“do a thing“" /tmp >/dev/null 2>&1; assert_eq "$?" "64" "launchd: smart quotes -> exit 64"
+"$HERE/../claude-marathon" "“do a thing“" /tmp >/dev/null 2>&1; assert_eq "$?" "64" "claude-marathon: smart quotes -> exit 64"
+
 # --- compute_sleep ---
 assert_eq "$(compute_sleep 2000 1000 60 1800)" "1060" "sleep: future epoch + buffer"
 assert_eq "$(compute_sleep 1000 2000 60 1800)" "0"    "sleep: past epoch clamps to 0"

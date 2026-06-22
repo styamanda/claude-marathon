@@ -35,6 +35,12 @@ USAGE
   exit 64
 fi
 
+if contains_smart_quotes "$*"; then
+  echo "error: your arguments contain curly/smart quotes (“ ” ‘ ’), not straight quotes (\")." >&2
+  echo "Retype the command with straight quotes." >&2
+  exit 64
+fi
+
 QUEUE_FILE="$1"
 if [[ ! -f "$QUEUE_FILE" ]]; then
   echo "error: queue file not found: $QUEUE_FILE" >&2

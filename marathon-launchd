@@ -15,9 +15,11 @@ DRYRUN=0
 RESUME_ID=""
 QUEUE_FILE=""
 STOP_ON_FAIL=""
+WATCH=0
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --dry-run) DRYRUN=1; shift ;;
+    --watch) WATCH=1; shift ;;
     --resume)
       RESUME_ID="${2:-}"
       [[ -z "$RESUME_ID" ]] && { echo "error: --resume requires a session id" >&2; exit 64; }
@@ -30,6 +32,24 @@ while [[ "${1:-}" == --* ]]; do
     *) break ;;
   esac
 done
+
+# Guard the #1 real-world failure: curly/smart quotes pasted from an editor.
+# The shell never treated them as quotes, so the task got split across args
+# (and the workdir consumed). Catch it here with a clear message rather than
+# silently loading a broken job.
+if contains_smart_quotes "$*"; then
+  cat >&2 <<'SMARTQ'
+error: your command contains curly/smart quotes (“ ” ‘ ’), not straight quotes.
+The shell does not treat curly quotes as quoting, so your task got split into
+words and the workdir was lost. Retype the command using straight quotes ("):
+
+  marathon-launchd --resume <id> "Your task here" /path/to/repo
+
+Tip: type the quotes directly in the terminal; don't paste them from a notes
+app or editor that auto-converts " into “ ”.
+SMARTQ
+  exit 64
+fi
 
 LABEL="com.claude-marathon.$(date +%Y%m%d-%H%M%S)"
 LA_DIR="$HOME/Library/LaunchAgents"
@@ -68,6 +88,7 @@ caffeinate so the Mac won't sleep. The job self-removes when finished, so it
 will not re-run on reboot.
 
   --dry-run        Write the plist and print the load command, but don't load it.
+  --watch          After loading, open a Terminal window tailing the live log.
   --resume <id>    Resume a specific existing session on the first iteration.
   --queue <file>   Run multiple tasks from <file> (separated by lines of `---`),
                    each as its own fresh isolated session.
@@ -103,3 +124,16 @@ echo "  workdir: $WORKDIR"
 echo "  log:     $LOGFILE"
 echo "  plist:   $PLIST (self-removes on completion)"
 echo "Stop early with: launchctl bootout gui/$(id -u)/$LABEL"
+
+# Let the user know it actually started (a desktop ping), and optionally pop a
+# live log terminal so they can watch it work.
+notify "claude-marathon started" "$DESC_KEY"
+if (( WATCH )); then
+  if open_log_terminal "$LOGFILE"; then
+    echo "  watching: opened a Terminal window tailing the log."
+  else
+    echo "  (--watch needs macOS Terminal; tail it yourself: tail -F \"$LOGFILE\")"
+  fi
+else
+  echo "Watch it live:   tail -F \"$LOGFILE\"   (or re-run with --watch to auto-open a window)"
+fi

@@ -41,6 +41,12 @@ USAGE
   exit 64
 fi
 
+if contains_smart_quotes "$*"; then
+  echo "error: your task contains curly/smart quotes (“ ” ‘ ’), not straight quotes (\")." >&2
+  echo "The shell split your task into words. Retype it with straight quotes." >&2
+  exit 64
+fi
+
 WORKDIR=$(cd "${2:-$PWD}" && pwd)
 if ! acquire_lock "$WORKDIR"; then
   echo "error: a marathon is already running for $WORKDIR." >&2

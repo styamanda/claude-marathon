@@ -18,6 +18,31 @@ marathon_version() {
   echo "claude-marathon 0.1.0"
 }
 
+# contains_smart_quotes <str> -> rc 0 if str contains a curly/smart quote.
+# Editors and terminals silently turn "..." into “...”; the shell does NOT
+# treat curly quotes as quoting, so a quoted task arg gets split into words
+# and the workdir gets eaten. We detect this so we can warn instead of mangle.
+contains_smart_quotes() {
+  case "$1" in
+    *“*|*”*|*‘*|*’*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# open_log_terminal <logfile> -> opens a macOS Terminal window tailing <logfile>.
+# Uses tail -F (follow by name, retry) so it works even before the file exists.
+# rc 1 if osascript is unavailable (non-macOS); the caller treats that as a no-op.
+open_log_terminal() {
+  local logfile="$1"
+  command -v osascript >/dev/null 2>&1 || return 1
+  osascript >/dev/null 2>&1 <<EOF
+tell application "Terminal"
+  activate
+  do script "echo '── claude-marathon live log ─────────────'; tail -F '${logfile}'"
+end tell
+EOF
+}
+
 # marathon_lock_path <workdir> -> lock directory path for that workdir
 marathon_lock_path() {
   local key

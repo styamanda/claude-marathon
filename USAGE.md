@@ -32,6 +32,15 @@ Installs a LaunchAgent that runs detached (survives logout), `caffeinate`-wrappe
 
     marathon-launchd --dry-run "your task" /path/to/your/repo
 
+**Know it's running:** a desktop notification fires the moment it loads. To
+*watch it work live*, add `--watch` — it opens a Terminal window tailing the log:
+
+    marathon-launchd --watch "your task" /path/to/your/repo
+
+> Always use **straight** quotes (`"`). Curly quotes (`“ ”`) from a notes app or
+> editor are not treated as quotes by the shell — the tool now detects them and
+> refuses with a clear error instead of mangling your task.
+
 ### 2B. New task, foreground (you're watching)
 
     claude-marathon "your task" /path/to/your/repo
