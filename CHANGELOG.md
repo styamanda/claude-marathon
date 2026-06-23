@@ -23,6 +23,7 @@ First community-ready release candidate.
 - Release preflight checks via `make release-check`.
 - Simulated limit/reset demo via `./demo/simulated-limit.sh`.
 - MIT license.
+- Homebrew tap formula at `styamanda/tap/claude-marathon`.
 - GitHub CI workflow, issue templates, contribution notes, release checklist,
   security notes, Homebrew formula template, and recommended repo metadata.
 

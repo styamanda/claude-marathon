@@ -1,18 +1,28 @@
-# Homebrew Tap
+# Homebrew
 
-Use this after publishing a versioned GitHub release.
+The public tap is:
 
-## Formula template
+```bash
+brew tap styamanda/tap
+brew install claude-marathon
+```
 
-Create a tap such as `styamanda/homebrew-tap`, then add
-`Formula/claude-marathon.rb`:
+Formula:
+
+```text
+https://github.com/styamanda/homebrew-tap/blob/main/Formula/claude-marathon.rb
+```
+
+## Formula
+
+Current `v0.1.0` formula:
 
 ```ruby
 class ClaudeMarathon < Formula
   desc "Headless Claude Code auto-resume runner for long tasks and usage-limit resets"
   homepage "https://github.com/styamanda/claude-marathon"
   url "https://github.com/styamanda/claude-marathon/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_RELEASE_TARBALL_SHA256"
+  sha256 "c41c208bbd5356f9bafc362b39e27e96acfdb5ae63fcbff992e80003d7f1a253"
   license "MIT"
 
   depends_on "jq"
@@ -30,19 +40,12 @@ class ClaudeMarathon < Formula
 end
 ```
 
-Compute the release tarball checksum:
+For future releases, compute the release tarball checksum:
 
 ```bash
 curl -L -o /tmp/claude-marathon-v0.1.0.tar.gz \
   https://github.com/styamanda/claude-marathon/archive/refs/tags/v0.1.0.tar.gz
 shasum -a 256 /tmp/claude-marathon-v0.1.0.tar.gz
-```
-
-Install from the tap:
-
-```bash
-brew tap styamanda/tap
-brew install claude-marathon
 ```
 
 ## Notes

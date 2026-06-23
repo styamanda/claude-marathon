@@ -34,6 +34,13 @@ Requirements: macOS or Unix shell, Claude Code CLI on your PATH, and `jq`.
 The foreground runner and queue are Unix-friendly; `marathon-launchd`, desktop
 notifications, and `--watch` are macOS-specific.
 
+Homebrew:
+
+    brew tap styamanda/tap
+    brew install claude-marathon
+
+Source checkout:
+
     # 1. Clone and install symlinks
     git clone https://github.com/styamanda/claude-marathon.git ~/Projects/claude-marathon
     cd ~/Projects/claude-marathon
