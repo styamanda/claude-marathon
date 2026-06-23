@@ -11,7 +11,23 @@ SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
 # shellcheck source=marathon-lib.sh
 source "$SCRIPT_DIR/marathon-lib.sh"
 
+show_usage() {
+  cat <<'USAGE'
+Usage: marathon-queue [--stop-on-fail] <queue-file> [workdir]
+
+Runs multiple tasks back-to-back, each as its own fresh isolated session,
+sleeping through usage-limit resets. Tasks in <queue-file> are separated by a
+line containing only `---`. By default the queue continues past a failed task;
+--stop-on-fail halts on the first failure.
+
+  -h, --help       Show this help
+  -v, --version    Print version
+  --stop-on-fail   Halt on the first failing task
+USAGE
+}
+
 case "${1:-}" in
+  -h|--help) show_usage; exit 0 ;;
   -v|--version) marathon_version; exit 0 ;;
 esac
 
@@ -24,14 +40,7 @@ while [[ "${1:-}" == --* ]]; do
 done
 
 if [[ $# -lt 1 || -z "${1:-}" ]]; then
-  cat >&2 <<'USAGE'
-Usage: marathon-queue [--stop-on-fail] <queue-file> [workdir]
-
-Runs multiple tasks back-to-back, each as its own fresh isolated session,
-sleeping through usage-limit resets. Tasks in <queue-file> are separated by a
-line containing only `---`. By default the queue continues past a failed task;
---stop-on-fail halts on the first failure.
-USAGE
+  show_usage >&2
   exit 64
 fi
 
@@ -47,11 +56,20 @@ if [[ ! -f "$QUEUE_FILE" ]]; then
   exit 66
 fi
 WORKDIR=$(cd "${2:-$PWD}" && pwd)
-if ! acquire_lock "$WORKDIR"; then
-  echo "error: a marathon is already running for $WORKDIR." >&2
-  echo "Stop it first, or target a different directory. (one marathon per directory)" >&2
+
+COLLIDE=$(detect_dir_collision "$WORKDIR")
+if [[ -n "$COLLIDE" ]]; then
+  echo "error: another Claude session is already active in $WORKDIR (pid(s): $COLLIDE)." >&2
+  echo "A marathon would share that conversation and collide. Close it first," >&2
+  echo "or set MARATHON_ALLOW_SHARED_DIR=1 to override." >&2
   exit 65
 fi
-trap 'release_lock "$WORKDIR"' EXIT INT TERM
+
+if ! acquire_lock "$WORKDIR"; then
+  echo "error: a marathon is already running for $WORKDIR." >&2
+  echo "Stop it first (claude-marathon --stop \"$WORKDIR\"), or target a different directory." >&2
+  exit 65
+fi
+install_cleanup_traps "$WORKDIR"
 
 run_marathon_queue "$QUEUE_FILE" "$WORKDIR" "$STOP_ON_FAIL"

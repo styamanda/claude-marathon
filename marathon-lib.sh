@@ -13,6 +13,8 @@
 : "${MARATHON_SLEEP_CMD:=sleep}"
 : "${MARATHON_NOTIFY:=auto}"
 : "${MARATHON_LOCK_DIR:=$HOME/.claude/marathon-locks}"
+: "${MARATHON_HEARTBEAT:=300}"
+: "${MARATHON_WAIT_POLL:=60}"
 
 marathon_version() {
   echo "claude-marathon 0.1.0"
@@ -66,6 +68,7 @@ acquire_lock() {
   mkdir -p "$(dirname "$lock")"
   if mkdir "$lock" 2>/dev/null; then
     echo $$ > "$lock/pid"
+    printf '%s\n' "$1" > "$lock/workdir"
     return 0
   fi
   holder=$(cat "$lock/pid" 2>/dev/null)
@@ -74,6 +77,7 @@ acquire_lock() {
   fi
   # stale lock — reclaim it
   echo $$ > "$lock/pid"
+  printf '%s\n' "$1" > "$lock/workdir"
   return 0
 }
 
@@ -84,6 +88,276 @@ release_lock() {
   holder=$(cat "$lock/pid" 2>/dev/null)
   [[ "$holder" == "$$" ]] && rm -rf "$lock"
   return 0
+}
+
+# install_cleanup_traps <workdir> -> release the lock on exit, AND make the
+# process actually TERMINATE on INT/TERM. A bare `trap '…' TERM` runs the handler
+# and then RESUMES the script — so `launchctl bootout`/`kill` would release the
+# lock but leave the loop running as an orphan, and the freed lock then lets a
+# second marathon start on top (the pile-up). Here we release the lock, restore
+# the signal's default action, and re-raise it so the process exits with the
+# right status; the EXIT trap stays armed and is a harmless idempotent re-release.
+install_cleanup_traps() {
+  local wd
+  printf -v wd '%q' "$1"
+  trap "release_lock $wd" EXIT
+  trap "release_lock $wd; trap - INT;  kill -INT  \$\$" INT
+  trap "release_lock $wd; trap - TERM; kill -TERM \$\$" TERM
+}
+
+# _marathon_descendants <pid> -> echo <pid> and every descendant pid, so a stop
+# can signal the whole tree (incl. the underlying `claude`), not just the top.
+_marathon_descendants() {
+  local pid="$1" child
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+      _marathon_descendants "$child"
+    done
+  fi
+  echo "$pid"
+}
+
+# marathon_status -> list every workdir lock with its pid, liveness, and workdir.
+marathon_status() {
+  local dir="${MARATHON_LOCK_DIR:-$HOME/.claude/marathon-locks}"
+  local found=0 lock pid wd state
+  for lock in "$dir"/*.lock; do
+    [[ -d "$lock" ]] || continue
+    found=1
+    pid=$(cat "$lock/pid" 2>/dev/null)
+    wd=$(cat "$lock/workdir" 2>/dev/null)
+    [[ -z "$wd" ]] && wd="(unknown workdir)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      state="RUNNING"
+    else
+      state="STALE  "
+    fi
+    echo "${state}  pid=${pid:-?}  ${wd}"
+  done
+  (( found )) || echo "(no marathons running)"
+}
+
+# marathon_log_files -> newest-first log paths, rc 1 when no logs exist.
+marathon_log_files() {
+  local dir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
+  [[ -d "$dir" ]] || return 1
+  (
+    shopt -s nullglob
+    local -a files=( "$dir"/*.log )
+    (( ${#files[@]} )) || exit 1
+    ls -t "${files[@]}"
+  )
+}
+
+# marathon_latest_log -> newest log path only.
+marathon_latest_log() {
+  marathon_log_files | sed -n '1p'
+}
+
+# marathon_logs [limit] -> short newest-first log listing.
+marathon_logs() {
+  local limit="${1:-10}" dir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=10
+  local files file n=0 stamp size last
+  files=$(marathon_log_files 2>/dev/null) || {
+    echo "(no marathon logs in $dir)"
+    return 0
+  }
+  echo "Recent marathon logs (newest first):"
+  while IFS= read -r file; do
+    (( n++ ))
+    (( n > limit )) && break
+    stamp=$(date -r "$file" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "unknown-time")
+    size=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
+    last=$(tail -n 1 "$file" 2>/dev/null)
+    printf '  %s  %s bytes  %s\n' "$stamp" "${size:-0}" "$file"
+    [[ -n "$last" ]] && printf '    last: %s\n' "$last"
+  done <<< "$files"
+}
+
+# marathon_tail [lines] -> tail the newest log. Follows by default; tests can set
+# MARATHON_TAIL_FOLLOW=0 to print once and exit.
+marathon_tail() {
+  local lines="${1:-80}" latest
+  [[ "$lines" =~ ^[0-9]+$ ]] || lines=80
+  latest=$(marathon_latest_log 2>/dev/null) || {
+    echo "No marathon logs found in ${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}." >&2
+    return 1
+  }
+  echo "Tailing latest marathon log: $latest" >&2
+  if [[ "${MARATHON_TAIL_FOLLOW:-1}" == "0" ]]; then
+    tail -n "$lines" "$latest"
+  else
+    tail -n "$lines" -F "$latest"
+  fi
+}
+
+_marathon_command_available() {
+  local cmd="$1"
+  if [[ "$cmd" == */* ]]; then
+    [[ -x "$cmd" ]]
+  else
+    command -v "$cmd" >/dev/null 2>&1
+  fi
+}
+
+_marathon_doctor_line() {
+  local status="$1" name="$2" detail="${3:-}"
+  if [[ -n "$detail" ]]; then
+    printf '%-4s  %-22s %s\n' "$status" "$name" "$detail"
+  else
+    printf '%-4s  %s\n' "$status" "$name"
+  fi
+}
+
+# marathon_doctor -> check local prerequisites. Returns 1 only for missing
+# requirements that prevent the core runner from working.
+marathon_doctor() {
+  local fail=0 warn=0 cmd dir
+  echo "claude-marathon doctor"
+
+  cmd="${MARATHON_CLAUDE_CMD:-claude}"
+  if _marathon_command_available "$cmd"; then
+    _marathon_doctor_line "OK" "claude CLI" "$cmd"
+  else
+    _marathon_doctor_line "FAIL" "claude CLI" "not found: $cmd"
+    fail=1
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    _marathon_doctor_line "OK" "jq" "$(command -v jq)"
+  else
+    _marathon_doctor_line "FAIL" "jq" "required for JSON result parsing"
+    fail=1
+  fi
+
+  dir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
+  if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
+    _marathon_doctor_line "OK" "log directory" "$dir"
+  else
+    _marathon_doctor_line "FAIL" "log directory" "not writable: $dir"
+    fail=1
+  fi
+
+  dir="${MARATHON_LOCK_DIR:-$HOME/.claude/marathon-locks}"
+  if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
+    _marathon_doctor_line "OK" "lock directory" "$dir"
+  else
+    _marathon_doctor_line "FAIL" "lock directory" "not writable: $dir"
+    fail=1
+  fi
+
+  if command -v launchctl >/dev/null 2>&1; then
+    _marathon_doctor_line "OK" "launchctl" "$(command -v launchctl)"
+  else
+    _marathon_doctor_line "WARN" "launchctl" "detached marathon-launchd runs are macOS-only"
+    warn=1
+  fi
+
+  if command -v caffeinate >/dev/null 2>&1; then
+    _marathon_doctor_line "OK" "caffeinate" "$(command -v caffeinate)"
+  else
+    _marathon_doctor_line "WARN" "caffeinate" "Mac sleep prevention unavailable"
+    warn=1
+  fi
+
+  if command -v osascript >/dev/null 2>&1; then
+    _marathon_doctor_line "OK" "osascript" "$(command -v osascript)"
+  else
+    _marathon_doctor_line "WARN" "osascript" "desktop notifications and --watch window unavailable"
+    warn=1
+  fi
+
+  if command -v claude-marathon >/dev/null 2>&1; then
+    _marathon_doctor_line "OK" "PATH: claude-marathon" "$(command -v claude-marathon)"
+  else
+    _marathon_doctor_line "WARN" "PATH: claude-marathon" "not on PATH; invoke via ./claude-marathon or install symlinks"
+    warn=1
+  fi
+
+  if command -v marathon-launchd >/dev/null 2>&1; then
+    _marathon_doctor_line "OK" "PATH: marathon-launchd" "$(command -v marathon-launchd)"
+  else
+    _marathon_doctor_line "WARN" "PATH: marathon-launchd" "not on PATH; detached launch helper may need ./marathon-launchd"
+    warn=1
+  fi
+
+  if (( fail )); then
+    echo "Result: FAIL"
+    return 1
+  fi
+  if (( warn )); then
+    echo "Result: OK with warnings"
+  else
+    echo "Result: OK"
+  fi
+  return 0
+}
+
+# marathon_stop <workdir> -> stop the marathon for <workdir> and clear its lock.
+# SIGTERM first (the cleanup trap exits cleanly, which also lets a launchd job
+# self-remove), escalating to SIGKILL if it ignores TERM; signals the whole
+# process subtree so the underlying `claude` cannot keep running. Returns 0 if it
+# stopped a marathon or cleared a stale lock, 1 if nothing was running.
+marathon_stop() {
+  local wd="$1" lock holder pids i
+  lock=$(marathon_lock_path "$wd")
+  holder=$(cat "$lock/pid" 2>/dev/null)
+  if [[ -z "$holder" ]]; then
+    echo "No marathon running for $wd."
+    return 1
+  fi
+  if ! kill -0 "$holder" 2>/dev/null; then
+    echo "Marathon for $wd already exited (stale lock, pid $holder) — cleared."
+    rm -rf "$lock"
+    return 0
+  fi
+  pids=$(_marathon_descendants "$holder")
+  echo "Stopping marathon for $wd (pid $holder and children)…"
+  # shellcheck disable=SC2086  # word-splitting of the pid list is intended
+  kill -TERM $pids 2>/dev/null
+  for ((i=0; i<20; i++)); do
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$holder" 2>/dev/null; then
+    echo "  ignored SIGTERM; sending SIGKILL."
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null
+    sleep 0.25
+  fi
+  rm -rf "$lock"
+  echo "  stopped."
+  return 0
+}
+
+# claude_sessions_in_dir <workdir> -> PIDs of `claude` CLI processes whose current
+# working directory is exactly <workdir> (i.e. that would share its conversation).
+# Best-effort: needs pgrep + lsof; prints nothing if either is missing. Used to
+# spot an interactive (VS Code / terminal) Claude session before a marathon starts
+# in the same directory — otherwise they collide on the same conversation.
+claude_sessions_in_dir() {
+  local wd="$1" p cwd self="$$"
+  command -v pgrep >/dev/null 2>&1 || return 0
+  command -v lsof  >/dev/null 2>&1 || return 0
+  for p in $(pgrep -f claude 2>/dev/null); do
+    [[ "$p" == "$self" ]] && continue
+    cwd=$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    [[ "$cwd" == "$wd" ]] && echo "$p"
+  done
+}
+
+# detect_dir_collision <workdir> -> PIDs of OTHER live Claude sessions sharing
+# <workdir> (empty output = clear to start). Honors MARATHON_ALLOW_SHARED_DIR=1
+# (force-allow) and MARATHON_SESSION_PROBE_CMD (override the scanner; for tests).
+detect_dir_collision() {
+  local wd="$1"
+  [[ "${MARATHON_ALLOW_SHARED_DIR:-0}" == "1" ]] && return 0
+  if [[ -n "${MARATHON_SESSION_PROBE_CMD:-}" ]]; then
+    "$MARATHON_SESSION_PROBE_CMD" "$wd"
+    return 0
+  fi
+  claude_sessions_in_dir "$wd"
 }
 
 # parse_reset_epoch <raw> -> Unix epoch of TODAY's reset time, or rc 1 if absent.
@@ -201,6 +475,44 @@ run_with_timeout() {
   return $?
 }
 
+# marathon_now -> current Unix epoch. Overridable via MARATHON_NOW_CMD so a test
+# can feed a simulated clock (e.g. model a system-sleep jump) deterministically.
+marathon_now() {
+  if [[ -n "${MARATHON_NOW_CMD:-}" ]]; then
+    "$MARATHON_NOW_CMD"
+  else
+    date +%s
+  fi
+}
+
+# marathon_wait_until <target_epoch> -> wait until the real wall clock reaches
+# <target_epoch>, polling in short (MARATHON_WAIT_POLL) chunks. Unlike a single
+# `sleep <duration>`, this is RESILIENT TO SYSTEM SLEEP: macOS freezes a sleeping
+# countdown while the Mac is asleep, but the wall clock jumps forward across the
+# sleep — so the first poll after the Mac wakes sees the target has passed and
+# returns at once (a laptop that slept overnight resumes the moment you reopen
+# it). Emits a "still waiting" pulse every MARATHON_HEARTBEAT seconds so a long
+# limit wait never looks frozen.
+marathon_wait_until() {
+  local target="$1" now left interval last_pulse
+  local poll="${MARATHON_WAIT_POLL:-60}"
+  local hb="${MARATHON_HEARTBEAT:-300}"
+  last_pulse=$(marathon_now)
+  while :; do
+    now=$(marathon_now)
+    (( now >= target )) && return 0
+    if [[ "$hb" =~ ^[0-9]+$ ]] && (( hb > 0 )) && (( now - last_pulse >= hb )); then
+      left=$(( target - now ))
+      echo "[$(date '+%H:%M:%S')]   … still waiting for usage reset (~$(( left / 60 ))m left, until $(date -r "$target" '+%H:%M:%S' 2>/dev/null))."
+      last_pulse=$now
+    fi
+    interval=$(( target - now ))
+    (( interval > poll )) && interval=$poll
+    (( interval < 1 )) && interval=1
+    "${MARATHON_SLEEP_CMD:-sleep}" "$interval"
+  done
+}
+
 # notify <title> <message> -> side effect (desktop notification / echo)
 notify() {
   local title="$1" msg="$2"
@@ -213,6 +525,18 @@ notify() {
   else
     echo "[notify] ${title}: ${msg}"
   fi
+}
+
+# marathon_heartbeat <interval_secs> -> prints a "still working" line every
+# <interval_secs> seconds until killed. With stream-json the live log now shows
+# each message/tool call as it happens; this pulse is a gap-filler for silent
+# stretches (the model thinking, or a long-running tool that emits no events).
+marathon_heartbeat() {
+  local interval="$1" elapsed=0
+  while sleep "$interval"; do
+    elapsed=$((elapsed + interval))
+    echo "[$(date '+%H:%M:%S')]   … still working (~$((elapsed / 60))m elapsed)."
+  done
 }
 
 # run_iteration <iter> <workdir> <task> <outfile> [resume_id] -> claude exit code
@@ -250,7 +574,7 @@ run_marathon() {
   local buffer="${MARATHON_BUFFER:-60}"
   local fallback="${MARATHON_FALLBACK_SLEEP:-300}"
   local logdir="${MARATHON_LOG_DIR:-$HOME/.claude/marathon-logs}"
-  local sleepcmd="${MARATHON_SLEEP_CMD:-sleep}"
+  local heartbeat="${MARATHON_HEARTBEAT:-300}"
 
   mkdir -p "$logdir"
   rm -f "$workdir/$sentinel"
@@ -261,8 +585,15 @@ run_marathon() {
     stamp=$(date +%Y%m%d-%H%M%S)
     outfile="$logdir/iter-${iter}-${stamp}.log"
 
+    echo "[$(date '+%H:%M:%S')] → iteration $((iter+1))/${max}: claude is working (live output follows — messages and tool calls stream in below)."
+    local hb_pid=""
+    if [[ "$heartbeat" =~ ^[0-9]+$ ]] && (( heartbeat > 0 )); then
+      marathon_heartbeat "$heartbeat" &
+      hb_pid=$!
+    fi
     run_iteration "$iter" "$workdir" "$task" "$outfile" "$resume_id"
     local code=$?
+    if [[ -n "$hb_pid" ]]; then kill "$hb_pid" 2>/dev/null; wait "$hb_pid" 2>/dev/null; fi
 
     if [[ -f "$workdir/$sentinel" ]]; then
       notify "claude-marathon" "Task complete after $((iter+1)) iteration(s)."
@@ -285,11 +616,17 @@ run_marathon() {
           echo "GAVE UP: still rate-limited after $max_limit_waits waits. Logs: $logdir"
           return 3
         fi
-        local epoch secs
+        local epoch secs now target wake
         epoch=${verdict#LIMIT }
-        secs=$(compute_sleep "$epoch" "$(date +%s)" "$buffer" "$fallback")
-        echo "Rate/usage limit hit; sleeping ${secs}s, then retrying (wait ${limit_waits}/${max_limit_waits})."
-        "$sleepcmd" "$secs"
+        now=$(date +%s)
+        secs=$(compute_sleep "$epoch" "$now" "$buffer" "$fallback")
+        target=$(( now + secs ))
+        wake=$(date -r "$target" '+%H:%M:%S %Z' 2>/dev/null)
+        [[ -n "$wake" ]] && wake=" (until ${wake})"
+        echo "[$(date '+%H:%M:%S')] Rate/usage limit hit; waiting ~${secs}s${wake}, then retrying (wait ${limit_waits}/${max_limit_waits})."
+        # Wait against the real clock (not a fixed-duration sleep) so a Mac that
+        # sleeps mid-wait resumes the moment it wakes instead of freezing.
+        marathon_wait_until "$target"
         continue   # do not increment iter — limit waits are free
         ;;
       ERROR*)

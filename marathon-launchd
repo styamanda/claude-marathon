@@ -11,6 +11,32 @@ SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
 # shellcheck source=marathon-lib.sh
 source "$SCRIPT_DIR/marathon-lib.sh"
 
+show_usage() {
+  cat <<'USAGE'
+Usage:
+  marathon-launchd [--dry-run] [--resume <session-id>] "<task>" [workdir]
+  marathon-launchd [--dry-run] --queue <file> [--stop-on-fail] [workdir]
+
+Installs a macOS LaunchAgent that runs detached (survives logout), wrapped in
+caffeinate so the Mac won't sleep. The job self-removes when finished, so it
+will not re-run on reboot.
+
+  -h, --help       Show this help
+  -v, --version    Print version
+  --dry-run        Write the plist and print the load command, but don't load it.
+  --watch          After loading, open a Terminal window tailing the live log.
+  --resume <id>    Resume a specific existing session on the first iteration.
+  --queue <file>   Run multiple tasks from <file> (separated by lines of `---`),
+                   each as its own fresh isolated session.
+  --stop-on-fail   (queue mode) Halt on the first failing task.
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help) show_usage; exit 0 ;;
+  -v|--version) marathon_version; exit 0 ;;
+esac
+
 DRYRUN=0
 RESUME_ID=""
 QUEUE_FILE=""
@@ -78,22 +104,7 @@ if [[ -n "$QUEUE_FILE" ]]; then
   DESC_KEY="queue:   $QUEUE_FILE"
 else
   if [[ $# -lt 1 || -z "${1:-}" ]]; then
-    cat >&2 <<'USAGE'
-Usage:
-  marathon-launchd [--dry-run] [--resume <session-id>] "<task>" [workdir]
-  marathon-launchd [--dry-run] --queue <file> [--stop-on-fail] [workdir]
-
-Installs a macOS LaunchAgent that runs detached (survives logout), wrapped in
-caffeinate so the Mac won't sleep. The job self-removes when finished, so it
-will not re-run on reboot.
-
-  --dry-run        Write the plist and print the load command, but don't load it.
-  --watch          After loading, open a Terminal window tailing the live log.
-  --resume <id>    Resume a specific existing session on the first iteration.
-  --queue <file>   Run multiple tasks from <file> (separated by lines of `---`),
-                   each as its own fresh isolated session.
-  --stop-on-fail   (queue mode) Halt on the first failing task.
-USAGE
+    show_usage >&2
     exit 64
   fi
   TASK="$1"
@@ -109,10 +120,19 @@ if (( DRYRUN )); then
   exit 0
 fi
 
+COLLIDE=$(detect_dir_collision "$WORKDIR")
+if [[ -n "$COLLIDE" ]]; then
+  rm -f "$PLIST"
+  echo "error: another Claude session is already active in $WORKDIR (pid(s): $COLLIDE)." >&2
+  echo "A marathon would share that conversation and collide. Close it first" >&2
+  echo "(e.g. your VS Code / terminal Claude), or set MARATHON_ALLOW_SHARED_DIR=1 to override." >&2
+  exit 65
+fi
+
 if lock_held "$WORKDIR"; then
   rm -f "$PLIST"
   echo "error: a marathon is already running for $WORKDIR." >&2
-  echo "Stop it first:  launchctl bootout gui/$(id -u)/<its-label>   (see ~/.claude/marathon-logs)" >&2
+  echo "Stop it first:  claude-marathon --stop \"$WORKDIR\"   (or launchctl bootout gui/$(id -u)/<label>)" >&2
   echo "Or target a different directory. (one marathon per directory)" >&2
   exit 65
 fi
@@ -123,7 +143,17 @@ echo "  $DESC_KEY"
 echo "  workdir: $WORKDIR"
 echo "  log:     $LOGFILE"
 echo "  plist:   $PLIST (self-removes on completion)"
-echo "Stop early with: launchctl bootout gui/$(id -u)/$LABEL"
+echo "Stop early with: claude-marathon --stop \"$WORKDIR\"   (or launchctl bootout gui/$(id -u)/$LABEL)"
+
+# Warn if the Mac is likely to sleep mid-run. caffeinate keeps it awake while the
+# lid is OPEN, but closing the lid (especially on battery) sleeps the Mac and
+# pauses the run until you reopen it. It resumes cleanly on wake, but makes no
+# progress while asleep — so for a true overnight run, stay plugged in, lid open.
+if command -v pmset >/dev/null 2>&1 && pmset -g batt 2>/dev/null | grep -q 'Battery Power'; then
+  echo "WARNING: you're on BATTERY. Keep the lid OPEN (and plug in) or macOS will sleep"
+  echo "         and pause the run — it resumes when you reopen the laptop, but does NOT"
+  echo "         work while asleep. Closing the lid is what stalled previous overnight runs."
+fi
 
 # Let the user know it actually started (a desktop ping), and optionally pop a
 # live log terminal so they can watch it work.

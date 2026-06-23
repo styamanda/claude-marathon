@@ -11,9 +11,76 @@ SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
 # shellcheck source=marathon-lib.sh
 source "$SCRIPT_DIR/marathon-lib.sh"
 
+show_usage() {
+  cat <<'USAGE'
+Usage: claude-marathon [--resume <session-id>] "<task description>" [workdir]
+
+Runs Claude Code headless in a loop, sleeping through usage-limit resets and
+resuming the same conversation until the task self-reports complete.
+
+  -h, --help      Show this help
+  -v, --version   Print version
+  --demo          Run a local synthetic limit/reset demo (no real Claude calls)
+  --doctor        Check local prerequisites and common setup issues
+  --logs [N]      List recent marathon logs (newest first)
+  --tail [N]      Tail the newest marathon log, showing the last N lines first
+  --status        List running/stale marathons and launchd jobs
+  --stop <dir>    Stop the marathon for a working directory
+  --resume <id>   Resume a specific existing session on the first iteration
+                  (instead of starting a fresh conversation). Find ids with
+                  `claude --resume` or in ~/.claude/projects/.
+
+Env overrides: MARATHON_MAX_ITERS, MARATHON_TIMEOUT, MARATHON_FALLBACK_SLEEP,
+MARATHON_BUFFER, MARATHON_LOG_DIR, MARATHON_SENTINEL, MARATHON_NOTIFY,
+MARATHON_HEARTBEAT, MARATHON_WAIT_POLL, MARATHON_NO_STREAM.
+USAGE
+}
+
 RESUME_ID=""
 case "${1:-}" in
+  -h|--help) show_usage; exit 0 ;;
   -v|--version) marathon_version; exit 0 ;;
+  --demo)
+    DEMO="$SCRIPT_DIR/demo/simulated-limit.sh"
+    if [[ ! -x "$DEMO" ]]; then
+      echo "error: demo script not found: $DEMO" >&2
+      exit 66
+    fi
+    "$DEMO"
+    exit $?
+    ;;
+  --doctor) marathon_doctor; exit $? ;;
+  --logs)
+    marathon_logs "${2:-10}"
+    exit $?
+    ;;
+  --tail)
+    marathon_tail "${2:-80}"
+    exit $?
+    ;;
+  --status)
+    marathon_status
+    if command -v launchctl >/dev/null 2>&1; then
+      echo
+      echo "launchd marathon jobs:"
+      if launchctl list 2>/dev/null | grep -q claude-marathon; then
+        { launchctl list 2>/dev/null | sed -n '1p'; launchctl list 2>/dev/null | grep claude-marathon; } | sed 's/^/  /'
+      else
+        echo "  (none)"
+      fi
+    fi
+    exit 0
+    ;;
+  --stop)
+    if [[ -z "${2:-}" ]]; then
+      echo "error: --stop requires a workdir (the repo the marathon runs in)." >&2
+      echo "See running marathons with: claude-marathon --status" >&2
+      exit 64
+    fi
+    STOP_WD=$(cd "$2" 2>/dev/null && pwd) || STOP_WD="$2"
+    marathon_stop "$STOP_WD"
+    exit $?
+    ;;
   -r|--resume)
     RESUME_ID="${2:-}"
     if [[ -z "$RESUME_ID" ]]; then
@@ -25,19 +92,7 @@ case "${1:-}" in
 esac
 
 if [[ $# -lt 1 || -z "${1:-}" ]]; then
-  cat >&2 <<'USAGE'
-Usage: claude-marathon [--resume <session-id>] "<task description>" [workdir]
-
-Runs Claude Code headless in a loop, sleeping through usage-limit resets and
-resuming the same conversation until the task self-reports complete.
-
-  --resume <id>   Resume a specific existing session on the first iteration
-                  (instead of starting a fresh conversation). Find ids with
-                  `claude --resume` or in ~/.claude/projects/.
-
-Env overrides: MARATHON_MAX_ITERS, MARATHON_TIMEOUT, MARATHON_FALLBACK_SLEEP,
-MARATHON_BUFFER, MARATHON_LOG_DIR, MARATHON_SENTINEL, MARATHON_NOTIFY.
-USAGE
+  show_usage >&2
   exit 64
 fi
 
@@ -48,11 +103,22 @@ if contains_smart_quotes "$*"; then
 fi
 
 WORKDIR=$(cd "${2:-$PWD}" && pwd)
-if ! acquire_lock "$WORKDIR"; then
-  echo "error: a marathon is already running for $WORKDIR." >&2
-  echo "Stop it first, or target a different directory. (one marathon per directory)" >&2
+
+# Refuse to start if another Claude session (e.g. VS Code / a terminal) is already
+# live in this directory — a marathon would share its conversation and collide.
+COLLIDE=$(detect_dir_collision "$WORKDIR")
+if [[ -n "$COLLIDE" ]]; then
+  echo "error: another Claude session is already active in $WORKDIR (pid(s): $COLLIDE)." >&2
+  echo "A marathon would share that conversation and collide. Close it first" >&2
+  echo "(e.g. your VS Code / terminal Claude), or set MARATHON_ALLOW_SHARED_DIR=1 to override." >&2
   exit 65
 fi
-trap 'release_lock "$WORKDIR"' EXIT INT TERM
+
+if ! acquire_lock "$WORKDIR"; then
+  echo "error: a marathon is already running for $WORKDIR." >&2
+  echo "Stop it first (claude-marathon --stop \"$WORKDIR\"), or target a different directory." >&2
+  exit 65
+fi
+install_cleanup_traps "$WORKDIR"
 
 run_marathon "$1" "$WORKDIR" "$RESUME_ID"

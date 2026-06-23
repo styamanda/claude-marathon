@@ -4,6 +4,21 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../marathon-lib.sh
 source "$HERE/../marathon-lib.sh"
 
+# Heartbeat is a wall-clock background pulse; keep it off so loop tests are
+# deterministic (a dedicated test below exercises it explicitly).
+export MARATHON_HEARTBEAT=0
+
+# The collision guard's real scanner shells out to pgrep+lsof; stub it off by
+# default so the suite is fast and deterministic. Specific tests set
+# MARATHON_SESSION_PROBE_CMD (or MARATHON_ALLOW_SHARED_DIR) to exercise it.
+export MARATHON_SESSION_PROBE_CMD=true
+
+# Pin a simulated clock far in the future so limit-waits in the loop tests return
+# instantly (marathon_wait_until polls the real clock; a dedicated test below
+# feeds it a controlled clock to verify the sleep-resilient behaviour).
+NOW_FAR=$(mktemp); printf '#!/usr/bin/env bash\necho 9999999999\n' > "$NOW_FAR"; chmod +x "$NOW_FAR"
+export MARATHON_NOW_CMD="$NOW_FAR"
+
 PASS=0
 FAIL=0
 
@@ -18,6 +33,23 @@ assert_eq() {
     echo "   want: $want"
     ((FAIL++))
   fi
+}
+
+# spawn_detached <pidfile> <cmd...> : run <cmd> as a process REPARENTED to init
+# (not a child of this shell), writing its pid to <pidfile>. Because it isn't our
+# child, `kill -0` reports it gone cleanly once it exits — no lingering zombie to
+# confuse the liveness checks in the trap/stop tests below.
+spawn_detached() {
+  local pf="$1"; shift
+  # Launch via a transient `bash -c` that backgrounds the command and exits at
+  # once: the command reparents to init, so the TEST shell never holds it as a
+  # job (no async "Terminated" notice when a later test kills it) and kill -0
+  # reports it gone cleanly on death (no lingering zombie).
+  local q="" a
+  for a in "$@"; do printf -v a '%q' "$a"; q+=" $a"; done
+  bash -c "$q & echo \$! > $(printf '%q' "$pf")" </dev/null
+  local _i
+  for ((_i=0; _i<40; _i++)); do [[ -s "$pf" ]] && break; sleep 0.05; done
 }
 
 # --- harness self-test ---
@@ -79,6 +111,43 @@ run_with_timeout 1 sleep 4; assert_eq "$?" "124" "timeout: slow command -> 124"
 # --- notify ---
 assert_eq "$(MARATHON_NOTIFY=off notify "T" "M")" "" "notify: off mode is silent"
 assert_eq "$(MARATHON_NOTIFY=echo notify "T" "M")" "[notify] T: M" "notify: echo mode prints"
+
+# --- log discovery / tail helpers ---
+LG_TMP=$(mktemp -d)
+printf 'old one\n' > "$LG_TMP/old.log"
+printf 'new one\nlast new\n' > "$LG_TMP/new.log"
+touch -t 202501010101 "$LG_TMP/old.log"
+touch -t 202501010202 "$LG_TMP/new.log"
+assert_eq "$(MARATHON_LOG_DIR="$LG_TMP" marathon_latest_log)" "$LG_TMP/new.log" \
+  "logs: latest log is newest by mtime"
+LG_OUT=$(MARATHON_LOG_DIR="$LG_TMP" marathon_logs 1)
+case "$LG_OUT" in *"$LG_TMP/new.log"* ) LG_HAS_NEW=yes;; *) LG_HAS_NEW=no;; esac
+assert_eq "$LG_HAS_NEW" "yes" "logs: list includes newest log"
+case "$LG_OUT" in *"$LG_TMP/old.log"* ) LG_HAS_OLD=yes;; *) LG_HAS_OLD=no;; esac
+assert_eq "$LG_HAS_OLD" "no" "logs: limit trims older logs"
+TAIL_OUT=$(MARATHON_LOG_DIR="$LG_TMP" MARATHON_TAIL_FOLLOW=0 marathon_tail 1 2>/dev/null)
+assert_eq "$TAIL_OUT" "last new" "tail: newest log, last N lines, no-follow mode"
+assert_eq "$(MARATHON_LOG_DIR="$LG_TMP/none" marathon_logs)" "(no marathon logs in $LG_TMP/none)" \
+  "logs: empty dir prints friendly message"
+rm -rf "$LG_TMP"
+
+# --- doctor ---
+DOC_TMP=$(mktemp -d)
+DOC_OUT=$(MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
+  MARATHON_LOG_DIR="$DOC_TMP/logs" MARATHON_LOCK_DIR="$DOC_TMP/locks" \
+  marathon_doctor)
+DOC_RC=$?
+assert_eq "$DOC_RC" "0" "doctor: passes with fake claude and writable dirs"
+case "$DOC_OUT" in *"OK"*"claude CLI"* ) DOC_CLAUDE=yes;; *) DOC_CLAUDE=no;; esac
+assert_eq "$DOC_CLAUDE" "yes" "doctor: reports claude CLI check"
+DOC_BAD=$(MARATHON_CLAUDE_CMD="$DOC_TMP/missing-claude" \
+  MARATHON_LOG_DIR="$DOC_TMP/logs" MARATHON_LOCK_DIR="$DOC_TMP/locks" \
+  marathon_doctor)
+DOC_BAD_RC=$?
+assert_eq "$DOC_BAD_RC" "1" "doctor: missing claude fails"
+case "$DOC_BAD" in *"FAIL"*"claude CLI"* ) DOC_FAIL=yes;; *) DOC_FAIL=no;; esac
+assert_eq "$DOC_FAIL" "yes" "doctor: missing claude reports FAIL"
+rm -rf "$DOC_TMP"
 
 # --- run_iteration ---
 chmod +x "$HERE/fake-claude.sh"
@@ -179,6 +248,36 @@ assert_eq "$LW_RC" "0" "marathon: completes despite 4 limit waits under MAX_ITER
 assert_eq "$(cat "$LW_TMP/n")" "5" "marathon: ran all 5 claude calls (4 limits + 1 done)"
 rm -rf "$LW_TMP"
 
+# --- run_marathon: prints a start line + heartbeat so the log isn't "frozen" ---
+HB_TMP=$(mktemp -d); mkdir -p "$HB_TMP/work" "$HB_TMP/logs"
+cat > "$HB_TMP/fake.sh" <<EOF
+#!/usr/bin/env bash
+sleep 2
+: > "$HB_TMP/work/.marathon-done"
+echo '{"is_error":false,"result":"done"}'
+EOF
+chmod +x "$HB_TMP/fake.sh"
+HB_OUT=$(MARATHON_CLAUDE_CMD="$HB_TMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$HB_TMP/logs" MARATHON_MAX_ITERS=2 MARATHON_HEARTBEAT=1 \
+  run_marathon "x" "$HB_TMP/work")
+assert_eq "$(echo "$HB_OUT" | grep -c 'iteration 1/2: claude is working')" "1" "marathon: prints iteration start line"
+case "$(echo "$HB_OUT" | grep -c 'still working')" in 0) HBP=no;; *) HBP=yes;; esac
+assert_eq "$HBP" "yes" "marathon: heartbeat pulses during a slow iteration"
+rm -rf "$HB_TMP"
+
+# --- run_marathon: limit sleep line shows the absolute wake time ---
+WK_TMP=$(mktemp -d); mkdir -p "$WK_TMP/work" "$WK_TMP/logs"
+cat > "$WK_TMP/fake.sh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"is_error":true,"result":"You'"'"'ve hit your session limit · resets 8pm"}'
+EOF
+chmod +x "$WK_TMP/fake.sh"
+WK_OUT=$(MARATHON_CLAUDE_CMD="$WK_TMP/fake.sh" MARATHON_SLEEP_CMD=true MARATHON_NOTIFY=off \
+  MARATHON_LOG_DIR="$WK_TMP/logs" MARATHON_MAX_ITERS=2 MARATHON_MAX_LIMIT_WAITS=1 \
+  run_marathon "x" "$WK_TMP/work")
+assert_eq "$(echo "$WK_OUT" | grep -c 'waiting ~.*s (until ')" "1" "marathon: limit line shows absolute wake time"
+rm -rf "$WK_TMP"
+
 # --- run_marathon: gives up (rc 3) if rate-limited beyond MAX_LIMIT_WAITS ---
 PL_TMP=$(mktemp -d); mkdir -p "$PL_TMP/work" "$PL_TMP/logs"
 cat > "$PL_TMP/fake.sh" <<'EOF'
@@ -270,13 +369,16 @@ chmod +x "$QBIN" 2>/dev/null || true
 "$QBIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-queue: no args -> 64"
 "$QBIN" /nonexistent/queue/file >/dev/null 2>&1; assert_eq "$?" "66" "marathon-queue: missing file -> 66"
 assert_eq "$("$QBIN" --version)" "claude-marathon 0.1.0" "marathon-queue: --version"
+"$QBIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "marathon-queue: --help -> rc 0"
 
 # --- entrypoint ---
 BIN="$HERE/../claude-marathon"
 chmod +x "$BIN" 2>/dev/null || true
 "$BIN" >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: no args -> usage exit 64"
 assert_eq "$("$BIN" --version)" "claude-marathon 0.1.0" "entrypoint: --version prints version"
+"$BIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "entrypoint: --help -> rc 0"
 "$BIN" --resume >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: --resume without id -> exit 64"
+"$BIN" --demo >/dev/null 2>&1; assert_eq "$?" "0" "entrypoint: --demo completes synthetic run"
 
 # --- entrypoint via symlink (finds lib through resolved path) ---
 LINK_TMP=$(mktemp -d)
@@ -329,8 +431,10 @@ rm -rf "$PLIST_TMP"
 LAUNCHD_BIN="$HERE/../marathon-launchd"
 chmod +x "$LAUNCHD_BIN" 2>/dev/null || true
 "$LAUNCHD_BIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-launchd: no args -> usage exit 64"
+"$LAUNCHD_BIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "marathon-launchd: --help -> rc 0"
+assert_eq "$("$LAUNCHD_BIN" --version)" "claude-marathon 0.1.0" "marathon-launchd: --version"
 DRY_TMP=$(mktemp -d)
-DRY_OUT=$(MARATHON_LOG_DIR="$DRY_TMP/logs" "$LAUNCHD_BIN" --dry-run "test task" "$DRY_TMP")
+DRY_OUT=$(HOME="$DRY_TMP/home" MARATHON_LOG_DIR="$DRY_TMP/logs" "$LAUNCHD_BIN" --dry-run "test task" "$DRY_TMP")
 assert_eq "$?" "0" "marathon-launchd: --dry-run exits 0"
 DRY_PLIST=$(echo "$DRY_OUT" | sed -n 's/^Wrote (dry-run): //p')
 plutil -lint "$DRY_PLIST" >/dev/null 2>&1
@@ -342,7 +446,7 @@ rm -f "$DRY_PLIST"; rm -rf "$DRY_TMP"
 
 # marathon-launchd queue mode --dry-run
 LQ_TMP=$(mktemp -d); printf 'a\n---\nb\n' > "$LQ_TMP/q.txt"
-LQ_OUT=$(MARATHON_LOG_DIR="$LQ_TMP/logs" "$LAUNCHD_BIN" --dry-run --queue "$LQ_TMP/q.txt" "$LQ_TMP")
+LQ_OUT=$(HOME="$LQ_TMP/home" MARATHON_LOG_DIR="$LQ_TMP/logs" "$LAUNCHD_BIN" --dry-run --queue "$LQ_TMP/q.txt" "$LQ_TMP")
 assert_eq "$?" "0" "marathon-launchd: --queue --dry-run exits 0"
 LQ_PLIST=$(echo "$LQ_OUT" | sed -n 's/^Wrote (dry-run): //p')
 plutil -lint "$LQ_PLIST" >/dev/null 2>&1
@@ -366,15 +470,167 @@ unset MARATHON_LOCK_DIR
 rm -rf "$LK_DIR" "$LK_WD"
 
 # entrypoints refuse when the workdir lock is held by another live process
-EL_DIR=$(mktemp -d); EL_WD=$(mktemp -d)
-sleep 60 & EL_BG=$!
+EL_DIR=$(mktemp -d); EL_WD=$(mktemp -d); EL_PF=$(mktemp)
+spawn_detached "$EL_PF" sleep 60; EL_BG=$(cat "$EL_PF")
 EL_LP=$(MARATHON_LOCK_DIR="$EL_DIR" marathon_lock_path "$EL_WD"); mkdir -p "$EL_LP"; echo "$EL_BG" > "$EL_LP/pid"
 MARATHON_LOCK_DIR="$EL_DIR" MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" "$BIN" "do x" "$EL_WD" >/dev/null 2>&1
 assert_eq "$?" "65" "claude-marathon: refuses (exit 65) when workdir lock held"
 MARATHON_LOCK_DIR="$EL_DIR" "$LAUNCHD_BIN" "do x" "$EL_WD" >/dev/null 2>&1
 assert_eq "$?" "65" "marathon-launchd: refuses (exit 65) when workdir lock held"
 kill "$EL_BG" 2>/dev/null
-rm -rf "$EL_DIR" "$EL_WD"
+rm -rf "$EL_DIR" "$EL_WD" "$EL_PF"
+
+# --- trap: stopping a running marathon ACTUALLY terminates it (no orphan) ---
+# Regression: a bare `trap '…' TERM` released the lock but RESUMED the loop, so
+# kill / launchctl bootout left an orphan AND freed the lock for a pile-up.
+TRAP_LOCKS=$(mktemp -d); TRAP_WD=$(mktemp -d); TRAP_PF=$(mktemp)
+cat > "$TRAP_WD/loop.sh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+source "$HERE/../marathon-lib.sh"
+export MARATHON_LOCK_DIR="$TRAP_LOCKS"
+acquire_lock "$TRAP_WD"
+install_cleanup_traps "$TRAP_WD"
+while true; do sleep 0.2; done
+EOF
+chmod +x "$TRAP_WD/loop.sh"
+spawn_detached "$TRAP_PF" "$TRAP_WD/loop.sh"
+TRAP_PID=$(cat "$TRAP_PF")
+for ((_i=0; _i<60; _i++)); do MARATHON_LOCK_DIR="$TRAP_LOCKS" lock_held "$TRAP_WD" && break; sleep 0.05; done
+MARATHON_LOCK_DIR="$TRAP_LOCKS" lock_held "$TRAP_WD"; assert_eq "$?" "0" "trap: marathon holds its lock while running"
+kill -TERM "$TRAP_PID" 2>/dev/null
+for ((_i=0; _i<60; _i++)); do kill -0 "$TRAP_PID" 2>/dev/null || break; sleep 0.05; done
+kill -0 "$TRAP_PID" 2>/dev/null; assert_eq "$?" "1" "trap: SIGTERM actually terminates the loop (no orphan)"
+MARATHON_LOCK_DIR="$TRAP_LOCKS" lock_held "$TRAP_WD"; assert_eq "$?" "1" "trap: lock released after stop"
+rm -rf "$TRAP_LOCKS" "$TRAP_WD" "$TRAP_PF"
+
+# --- marathon_status / marathon_stop ---
+ST_DIR=$(mktemp -d)
+assert_eq "$(MARATHON_LOCK_DIR="$ST_DIR" marathon_status)" "(no marathons running)" "status: empty -> none"
+ST_WD1=$(mktemp -d); ST_WD2=$(mktemp -d); ST_PF=$(mktemp)
+spawn_detached "$ST_PF" sleep 60
+ST_LIVE=$(cat "$ST_PF")
+L1=$(MARATHON_LOCK_DIR="$ST_DIR" marathon_lock_path "$ST_WD1"); mkdir -p "$L1"; echo "$ST_LIVE" > "$L1/pid"; echo "$ST_WD1" > "$L1/workdir"
+L2=$(MARATHON_LOCK_DIR="$ST_DIR" marathon_lock_path "$ST_WD2"); mkdir -p "$L2"; echo 999999 > "$L2/pid"; echo "$ST_WD2" > "$L2/workdir"
+ST_OUT=$(MARATHON_LOCK_DIR="$ST_DIR" marathon_status)
+assert_eq "$(echo "$ST_OUT" | grep -c RUNNING)" "1" "status: live marathon reported RUNNING"
+assert_eq "$(echo "$ST_OUT" | grep -c STALE)"   "1" "status: dead marathon reported STALE"
+case "$ST_OUT" in *"$ST_WD1"*) SWD=yes;; *) SWD=no;; esac
+assert_eq "$SWD" "yes" "status: shows the workdir"
+MARATHON_LOCK_DIR="$ST_DIR" marathon_stop "$ST_WD2" >/dev/null; assert_eq "$?" "0" "stop: stale lock -> rc 0"
+[[ -d "$L2" ]] && SL2=yes || SL2=no; assert_eq "$SL2" "no" "stop: stale lock removed"
+MARATHON_LOCK_DIR="$ST_DIR" marathon_stop "$ST_WD1" >/dev/null; assert_eq "$?" "0" "stop: live marathon -> rc 0"
+for ((_i=0; _i<60; _i++)); do kill -0 "$ST_LIVE" 2>/dev/null || break; sleep 0.05; done
+kill -0 "$ST_LIVE" 2>/dev/null; assert_eq "$?" "1" "stop: live process actually terminated"
+[[ -d "$L1" ]] && SL1=yes || SL1=no; assert_eq "$SL1" "no" "stop: live lock removed"
+MARATHON_LOCK_DIR="$ST_DIR" marathon_stop "$ST_WD1" >/dev/null; assert_eq "$?" "1" "stop: nothing running -> rc 1"
+rm -rf "$ST_DIR" "$ST_WD1" "$ST_WD2" "$ST_PF"
+
+# --- detect_dir_collision (startup guard against VS Code / interactive sessions) ---
+CD_PROBE=$(mktemp)
+cat > "$CD_PROBE" <<'EOF'
+#!/usr/bin/env bash
+echo 4242   # pretend a live Claude session has this cwd
+EOF
+chmod +x "$CD_PROBE"
+assert_eq "$(MARATHON_SESSION_PROBE_CMD="$CD_PROBE" detect_dir_collision /some/dir)" "4242" \
+  "collision: probe reports a live session in the dir"
+assert_eq "$(MARATHON_ALLOW_SHARED_DIR=1 MARATHON_SESSION_PROBE_CMD="$CD_PROBE" detect_dir_collision /some/dir)" "" \
+  "collision: MARATHON_ALLOW_SHARED_DIR=1 overrides the guard"
+assert_eq "$(claude_sessions_in_dir "$(mktemp -d)")" "" \
+  "collision: real scanner finds no session in a fresh temp dir"
+# entrypoint refuses (65) when a Claude session is already active in the workdir
+CE_LOCK=$(mktemp -d); CE_WD=$(mktemp -d)
+MARATHON_LOCK_DIR="$CE_LOCK" MARATHON_SESSION_PROBE_CMD="$CD_PROBE" \
+  MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" "$BIN" "do x" "$CE_WD" >/dev/null 2>&1
+assert_eq "$?" "65" "claude-marathon: refuses (65) when another Claude session is active in workdir"
+rm -rf "$CE_LOCK" "$CE_WD"; rm -f "$CD_PROBE"
+
+# --- marathon_wait_until: resilient to a clock jump (system sleep) ---
+WU_CTR=$(mktemp); echo 0 > "$WU_CTR"; WU_NOW=$(mktemp)
+cat > "$WU_NOW" <<EOF
+#!/usr/bin/env bash
+i=\$(cat "$WU_CTR"); i=\$((i+1)); echo "\$i" > "$WU_CTR"
+case "\$i" in
+  1) echo 1000000 ;;   # start
+  2) echo 1000030 ;;   # 30s later, still waiting
+  *) echo 1100000 ;;   # big jump: Mac woke from a long sleep, now past target
+esac
+EOF
+chmod +x "$WU_NOW"
+MARATHON_NOW_CMD="$WU_NOW" MARATHON_SLEEP_CMD=true MARATHON_HEARTBEAT=0 MARATHON_WAIT_POLL=60 \
+  marathon_wait_until 1003600
+assert_eq "$?" "0" "wait_until: returns after the clock jumps past target (sleep-resilient)"
+assert_eq "$(cat "$WU_CTR")" "3" "wait_until: polled the clock until the jump (3 reads)"
+rm -f "$WU_CTR" "$WU_NOW"
+# past target -> returns immediately, real clock
+PAST=$(( $(date +%s) - 10 ))
+MARATHON_NOW_CMD= MARATHON_SLEEP_CMD=true MARATHON_HEARTBEAT=0 marathon_wait_until "$PAST"
+assert_eq "$?" "0" "wait_until: past target returns immediately"
+# the 'still waiting' pulse fires during a long wait
+WP_CTR=$(mktemp); echo 0 > "$WP_CTR"; WP_NOW=$(mktemp)
+cat > "$WP_NOW" <<EOF
+#!/usr/bin/env bash
+i=\$(cat "$WP_CTR"); i=\$((i+1)); echo "\$i" > "$WP_CTR"
+case "\$i" in
+  1) echo 2000000 ;;
+  2) echo 2000400 ;;   # 400s elapsed (> HEARTBEAT 300) -> pulse
+  *) echo 2100000 ;;   # jump past target
+esac
+EOF
+chmod +x "$WP_NOW"
+WP_OUT=$(MARATHON_NOW_CMD="$WP_NOW" MARATHON_SLEEP_CMD=true MARATHON_HEARTBEAT=300 MARATHON_WAIT_POLL=60 \
+  marathon_wait_until 2003600)
+case "$WP_OUT" in *"still waiting for usage reset"*) WPP=yes;; *) WPP=no;; esac
+assert_eq "$WPP" "yes" "wait_until: prints a 'still waiting' pulse during the wait"
+rm -f "$WP_CTR" "$WP_NOW"
+
+# --- entrypoint --status / --stop ---
+SS_LOCK=$(mktemp -d); SS_NONE=$(mktemp -d)
+MARATHON_LOCK_DIR="$SS_LOCK" "$BIN" --status >/dev/null 2>&1; assert_eq "$?" "0" "entrypoint: --status -> rc 0"
+MARATHON_LOCK_DIR="$SS_LOCK" "$BIN" --stop >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: --stop without workdir -> rc 64"
+MARATHON_LOCK_DIR="$SS_LOCK" "$BIN" --stop "$SS_NONE" >/dev/null 2>&1; assert_eq "$?" "1" "entrypoint: --stop with nothing running -> rc 1"
+rm -rf "$SS_LOCK" "$SS_NONE"
+
+# --- entrypoint --doctor / --logs / --tail ---
+CLI_TMP=$(mktemp -d); printf 'line 1\nline 2\n' > "$CLI_TMP/latest.log"
+MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" MARATHON_LOG_DIR="$CLI_TMP/logs" \
+  MARATHON_LOCK_DIR="$CLI_TMP/locks" "$BIN" --doctor >/dev/null 2>&1
+assert_eq "$?" "0" "entrypoint: --doctor -> rc 0 when required checks pass"
+CLI_LOGS=$(MARATHON_LOG_DIR="$CLI_TMP" "$BIN" --logs 1)
+case "$CLI_LOGS" in *latest.log* ) CLOG=yes;; *) CLOG=no;; esac
+assert_eq "$CLOG" "yes" "entrypoint: --logs lists recent logs"
+CLI_TAIL=$(MARATHON_LOG_DIR="$CLI_TMP" MARATHON_TAIL_FOLLOW=0 "$BIN" --tail 1 2>/dev/null)
+assert_eq "$CLI_TAIL" "line 2" "entrypoint: --tail prints newest log in no-follow mode"
+rm -rf "$CLI_TMP"
+
+# --- install.sh ---
+INST_TMP=$(mktemp -d)
+BIN_DIR="$INST_TMP/bin" MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
+  MARATHON_LOG_DIR="$INST_TMP/logs" MARATHON_LOCK_DIR="$INST_TMP/locks" \
+  "$HERE/../install.sh" >/dev/null 2>&1
+assert_eq "$?" "0" "install: symlink install completes"
+[[ -L "$INST_TMP/bin/claude-marathon" ]]; assert_eq "$?" "0" "install: claude-marathon symlink created"
+[[ -L "$INST_TMP/bin/marathon-launchd" ]]; assert_eq "$?" "0" "install: marathon-launchd symlink created"
+[[ -L "$INST_TMP/bin/marathon-queue" ]]; assert_eq "$?" "0" "install: marathon-queue symlink created"
+BIN_DIR="$INST_TMP/bin" "$HERE/../uninstall.sh" >/dev/null 2>&1
+assert_eq "$?" "0" "uninstall: symlink uninstall completes"
+[[ ! -e "$INST_TMP/bin/claude-marathon" ]]; assert_eq "$?" "0" "uninstall: claude-marathon symlink removed"
+[[ ! -e "$INST_TMP/bin/marathon-launchd" ]]; assert_eq "$?" "0" "uninstall: marathon-launchd symlink removed"
+[[ ! -e "$INST_TMP/bin/marathon-queue" ]]; assert_eq "$?" "0" "uninstall: marathon-queue symlink removed"
+mkdir -p "$INST_TMP/logs" "$INST_TMP/locks"; touch "$INST_TMP/logs/x.log" "$INST_TMP/locks/x.lock"
+BIN_DIR="$INST_TMP/bin" MARATHON_LOG_DIR="$INST_TMP/logs" MARATHON_LOCK_DIR="$INST_TMP/locks" \
+  "$HERE/../uninstall.sh" --all >/dev/null 2>&1
+assert_eq "$?" "0" "uninstall: --all completes"
+[[ ! -e "$INST_TMP/logs" ]]; assert_eq "$?" "0" "uninstall: --all removes logs"
+[[ ! -e "$INST_TMP/locks" ]]; assert_eq "$?" "0" "uninstall: --all removes locks"
+rm -rf "$INST_TMP"
+
+# --- release preflight ---
+"$HERE/../scripts/release-check.sh" >/dev/null 2>&1
+assert_eq "$?" "1" "release-check: fails until LICENSE and dated changelog exist"
+
+rm -f "$NOW_FAR"
 
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
