@@ -8,6 +8,8 @@ Step-by-step procedures for running a task. For design/internals see `README.md`
   `~/.local/bin`).
 - Confirm anytime:
 
+      claude-marathon --doctor       # environment and PATH check
+      claude-marathon --demo         # synthetic limit/reset demo
       claude-marathon --version      # -> claude-marathon 0.1.0
 
 ## 1. Prepare the working directory
@@ -27,10 +29,15 @@ If it isn't a repo yet: `git init`.
 
     marathon-launchd "Refactor the auth module and make all tests pass" /path/to/your/repo
 
-Installs a LaunchAgent that runs detached (survives logout), `caffeinate`-wrapped
-(Mac won't sleep), and self-removes when done. Preview without launching:
+Installs a LaunchAgent that runs detached (survives logout), `caffeinate`-wrapped,
+and self-removes when done. Preview without launching:
 
     marathon-launchd --dry-run "your task" /path/to/your/repo
+
+> **Overnight on a laptop:** plug in and **leave the lid open.** `caffeinate`
+> stops *idle* sleep but not *lid-close* sleep — close the lid and macOS sleeps,
+> pausing the run until you reopen it (it resumes cleanly on wake, but does no
+> work while asleep). `marathon-launchd` warns you when you launch on battery.
 
 **Know it's running:** a desktop notification fires the moment it loads. To
 *watch it work live*, add `--watch` — it opens a Terminal window tailing the log:
@@ -85,15 +92,30 @@ Do NOT have an interactive session open in the same directory at the same time.
 
 ## 4. Monitor a running job
 
-    ls -lt ~/.claude/marathon-logs/
-    tail -f ~/.claude/marathon-logs/com.claude-marathon.*.log
-    launchctl list | grep claude-marathon
+    claude-marathon --status         # running/stale jobs and launchd labels
+    claude-marathon --logs           # recent logs, newest first
+    claude-marathon --tail           # tail the newest log
+
+The job is headless: it streams to the log, not to the VS Code extension or the
+Claude Code app (those show interactive sessions only). Watch it live in a
+terminal — `marathon-launchd --watch` auto-opens a window, and
+`claude-marathon --tail` follows the newest log.
 
 In the log, look for:
 
-- `sleeping <N>s until reset`  -> hit a usage limit, waiting (working as intended)
+- `→ iteration N/M: claude is working` -> an iteration started; its work then
+  streams in live below
+- `claude: …` -> a message from Claude as it works
+- `🔧 <tool>: …` -> a tool call (`🔧 Bash: …`, `🔧 Write: …`) as Claude makes it
+- `● result: <subtype>` -> the iteration's turn ended (success / error)
+- `… still working (~Nm elapsed)` -> heartbeat filling a silent stretch (thinking / long tool)
+- `waiting ~<N>s (until HH:MM:SS)` -> hit a usage limit, waiting until that
+  wake time (working as intended). The wait is timed against the real clock, so
+  it survives the Mac sleeping — it resumes the moment the machine wakes.
+- `… still waiting for usage reset (~Nm left, until HH:MM)` -> pulse while it
+  waits out a limit, so a long wait never looks frozen
 - `DONE after N iteration(s)`  -> finished
-- `ERROR stop:` / `CAP reached:` -> stopped; read why
+- `ERROR stop:` / `CAP reached:` / `GAVE UP:` -> stopped; read why
 
 ## 5. When it finishes
 
@@ -123,6 +145,14 @@ same repo, stop the current job first (see below). Locks live in
 
 ## 6. Stop a job early
 
+    claude-marathon --status                   # see what's running (state, pid, workdir)
+    claude-marathon --stop /path/to/repo       # stop that repo's marathon cleanly + clear its lock
+
+`--stop` signals the whole process tree (so the underlying `claude` can't keep
+running) and escalates to SIGKILL only if the job ignores the polite stop. It
+also works on a detached `marathon-launchd` job — the LaunchAgent self-removes
+when its worker exits. The lower-level equivalent still works too:
+
     launchctl bootout gui/$(id -u)/<label>     # label is printed at launch / is the log filename
 
 For a foreground run: `Ctrl-C`.
@@ -141,10 +171,16 @@ For a foreground run: `Ctrl-C`.
 | `MARATHON_LOG_DIR` | `~/.claude/marathon-logs` | Where logs go |
 | `MARATHON_SENTINEL` | `.marathon-done` | Completion sentinel filename |
 | `MARATHON_NOTIFY` | auto | `auto` / `echo` / `off` |
+| `MARATHON_HEARTBEAT` | 300 | Seconds between "still working"/"still waiting" pulses (0 = off) |
+| `MARATHON_WAIT_POLL` | 60 | Limit-wait poll interval (s) — how soon it resumes after the Mac wakes |
+| `MARATHON_ALLOW_SHARED_DIR` | unset | Set `1` to skip the "another Claude session is active here" guard |
 
 ## Quick reference (the 90% case)
 
     cd /path/to/repo
+    claude-marathon --doctor
+    claude-marathon --demo
     marathon-launchd "do X until tests pass" .
+    claude-marathon --tail
     # ...later...
     git -C /path/to/repo diff

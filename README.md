@@ -1,37 +1,101 @@
 # claude-marathon
 
-Run a long Claude Code task unattended across usage-limit resets. When Claude
-hits its limit, the wrapper parses the reset time, sleeps until then, and
-resumes the same conversation — looping until the task is done.
+[![CI](https://github.com/styamanda/claude-marathon/actions/workflows/ci.yml/badge.svg)](https://github.com/styamanda/claude-marathon/actions/workflows/ci.yml)
+
+Run long Claude Code tasks unattended across usage-limit resets.
+
+Claude hits a limit at 2am, the terminal is gone, and the task is only half
+done. `claude-marathon` runs Claude Code from outside the session, waits through
+the reset window, resumes the same conversation, streams progress to logs, and
+stops only when Claude creates the completion sentinel.
+
+## What makes it different
+
+Most Claude auto-resume tools watch an interactive tmux pane and type
+`continue` when the reset time passes. That is great when you want to keep using
+Claude's TUI. `claude-marathon` is for the other case: a headless, detached job
+that should keep going even after you close the terminal.
+
+| Tool | Best fit | How it resumes |
+|------|----------|----------------|
+| `claude-marathon` | Detached long-running jobs, overnight work, queues, clean stop/status | Headless `claude -p`, result parsing, `--continue`, launchd |
+| [`claude-auto-retry`](https://github.com/cheapestinference/claude-auto-retry) | Keep normal interactive Claude sessions alive | tmux capture-pane + send `continue` |
+| [`autoclaude`](https://github.com/henryaj/autoclaude) | TUI dashboard for multiple tmux panes | tmux pane polling + send `continue` |
+| [`claude-auto-resume`](https://github.com/terryso/claude-auto-resume) | Small wait-and-rerun wrapper | CLI output parsing + rerun Claude |
+
+Use `claude-marathon` when you want locks, detached macOS launchd execution,
+streamed logs, completion sentinels, queues, and a stop command that kills the
+whole process tree. Use a tmux helper when the live interactive Claude UI is the
+main thing you want.
 
 ## Install
 
-macOS, with the `claude` CLI on your PATH, plus `jq`. (The foreground
-`claude-marathon` and the queue work on any Unix; only the detached
-`marathon-launchd` and the `--watch` log window are macOS-specific.)
+Requirements: macOS or Unix shell, Claude Code CLI on your PATH, and `jq`.
+The foreground runner and queue are Unix-friendly; `marathon-launchd`, desktop
+notifications, and `--watch` are macOS-specific.
 
-    # 1. Clone
+    # 1. Clone and install symlinks
     git clone https://github.com/styamanda/claude-marathon.git ~/Projects/claude-marathon
     cd ~/Projects/claude-marathon
+    ./install.sh
 
-    # 2. Make the scripts runnable
-    chmod +x claude-marathon marathon-launchd marathon-queue
+    # 2. Verify setup
+    claude-marathon --doctor
 
-    # 3. Put them on your PATH (symlinks, so `git pull` updates them in place)
-    mkdir -p ~/.local/bin
-    ln -sf "$PWD/claude-marathon"  ~/.local/bin/
-    ln -sf "$PWD/marathon-launchd" ~/.local/bin/
-    ln -sf "$PWD/marathon-queue"   ~/.local/bin/
+The installer creates symlinks in `~/.local/bin` by default, so `git pull`
+updates the commands in place. Override with `BIN_DIR=/custom/bin ./install.sh`.
 
-    # 4. Verify (ensure ~/.local/bin is on your PATH)
-    claude-marathon --version          # -> claude-marathon 0.1.0
+Uninstall symlinks later with:
 
-Update later with `git -C ~/Projects/claude-marathon pull`; the symlinks pick up
-the new version automatically.
+    ./uninstall.sh
+
+Update later with:
+
+    git -C ~/Projects/claude-marathon pull
+    claude-marathon --doctor
 
 > Always use **straight** quotes (`"`) around the task. Curly quotes (`“ ”`)
 > pasted from a notes app or editor are not treated as quoting by the shell; the
 > tool detects them and refuses with a clear error rather than mangling the task.
+
+## Quick start
+
+    cd /path/to/repo
+    marathon-launchd "Refactor module X and make all tests pass" .
+
+Watch it:
+
+    claude-marathon --tail
+
+Stop it:
+
+    claude-marathon --stop /path/to/repo
+
+Check recent runs:
+
+    claude-marathon --status
+    claude-marathon --logs
+
+Try a local simulated limit/reset run without using real Claude quota:
+
+    claude-marathon --demo
+
+## Best for / not for
+
+Best for:
+
+- Long tasks that may hit Claude usage limits before completion.
+- Overnight detached runs on a plugged-in Mac with the lid open.
+- Repos or worktrees where unattended edits are contained and reversible.
+- Batch work via `marathon-queue`.
+
+Not for:
+
+- Live interactive Claude Code sessions where you want the full TUI visible.
+- Closed-lid laptop work. macOS sleeps; no script can make progress while the
+  machine is actually asleep.
+- Production directories or sensitive machines where bypassed permissions are
+  unacceptable.
 
 ## Why a script (not a slash command)
 
@@ -94,6 +158,8 @@ early with the `launchctl bootout ...` command printed at install time.
 - Caps: max 20 iterations, 2h per-run timeout. Override via env vars.
 - Every iteration is logged to `~/.claude/marathon-logs/`.
 
+See `SECURITY.md` for the threat model and safe-use checklist.
+
 ## Env overrides
 
 | Var | Default | Meaning |
@@ -105,10 +171,49 @@ early with the `launchctl bootout ...` command printed at install time.
 | `MARATHON_LOG_DIR` | `~/.claude/marathon-logs` | Per-iteration logs |
 | `MARATHON_SENTINEL` | `.marathon-done` | Completion sentinel filename |
 | `MARATHON_NOTIFY` | auto | `auto` / `echo` / `off` |
+| `MARATHON_HEARTBEAT` | 300 | Seconds between "still working"/"still waiting" log pulses (0 = off) |
+| `MARATHON_WAIT_POLL` | 60 | Limit-wait poll interval (s) — how soon it resumes after the Mac wakes |
+| `MARATHON_ALLOW_SHARED_DIR` | unset | Set `1` to skip the "another Claude session is active here" guard |
+
+## Laptop sleep & overnight runs
+
+`caffeinate` keeps the Mac awake only while the **lid is open**. Closing the lid
+(especially on battery) sleeps the whole Mac, and a sleeping Mac makes no
+progress — no software the job runs can override a closed-lid sleep. Because the
+limit wait is sleep-resilient, a job picks up where it left off when you reopen
+the laptop, but it will **not** advance overnight with the lid shut.
+
+For a real overnight run: **plug in and leave the lid open.** `marathon-launchd`
+prints a warning when you launch on battery.
+
+## Inspecting and stopping runs
+
+    claude-marathon --status              # list every marathon: state, pid, workdir
+    claude-marathon --stop /path/to/repo  # stop the marathon for that repo, cleanly
+
+`--stop` signals the whole process tree (so the underlying `claude` can't keep
+running) and clears the lock, escalating to `SIGKILL` only if a job ignores the
+polite stop. A marathon now also exits cleanly on `launchctl bootout` / `kill`
+(it releases its lock and actually terminates, rather than lingering as an
+orphan that holds a stale lock).
 
 ## Tests
 
+    make verify
+
+Or run the pieces directly:
+
     bash test/run-tests.sh
+    claude-marathon --demo
+    git diff --check
+
+Before a public release, run:
+
+    make release-check
+
+For contribution and release workflow details, see `CONTRIBUTING.md`,
+`CHANGELOG.md`, `RELEASE.md`, `SECURITY.md`, `docs/DEMO.md`,
+`docs/HOMEBREW.md`, and `docs/REPO_METADATA.md`.
 
 ## Usage-limit detection
 
@@ -130,7 +235,8 @@ until the limit clears. Detection accepts, most precise first:
 Limit waits do **not** consume the iteration budget (`MARATHON_MAX_ITERS`); a
 separate `MARATHON_MAX_LIMIT_WAITS` (default 96) bounds how long it will keep
 retrying a persistent limit before giving up (exit code 3). On a real limit the
-log shows `Rate/usage limit hit; sleeping Ns, then retrying (wait k/96)`.
+log shows `Rate/usage limit hit; waiting ~Ns (until HH:MM:SS TZ), then retrying
+(wait k/96)`.
 
 ## Multiple tasks (queue)
 
