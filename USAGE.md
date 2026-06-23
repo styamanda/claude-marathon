@@ -10,7 +10,7 @@ Step-by-step procedures for running a task. For design/internals see `README.md`
 
       claude-marathon --doctor       # environment and PATH check
       claude-marathon --demo         # synthetic limit/reset demo
-      claude-marathon --version      # -> claude-marathon 0.1.0
+      claude-marathon --version      # -> claude-marathon 0.1.1
 
 ## 1. Prepare the working directory
 

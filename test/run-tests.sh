@@ -53,7 +53,7 @@ spawn_detached() {
 }
 
 # --- harness self-test ---
-assert_eq "$(marathon_version)" "claude-marathon 0.1.0" "marathon_version returns version string"
+assert_eq "$(marathon_version)" "claude-marathon 0.1.1" "marathon_version returns version string"
 
 # --- classify_result ---
 assert_eq "$(classify_result "$(cat "$HERE/fixtures/limit.json")" 0)" \
@@ -388,14 +388,14 @@ QBIN="$HERE/../marathon-queue"
 chmod +x "$QBIN" 2>/dev/null || true
 "$QBIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-queue: no args -> 64"
 "$QBIN" /nonexistent/queue/file >/dev/null 2>&1; assert_eq "$?" "66" "marathon-queue: missing file -> 66"
-assert_eq "$("$QBIN" --version)" "claude-marathon 0.1.0" "marathon-queue: --version"
+assert_eq "$("$QBIN" --version)" "claude-marathon 0.1.1" "marathon-queue: --version"
 "$QBIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "marathon-queue: --help -> rc 0"
 
 # --- entrypoint ---
 BIN="$HERE/../claude-marathon"
 chmod +x "$BIN" 2>/dev/null || true
 "$BIN" >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: no args -> usage exit 64"
-assert_eq "$("$BIN" --version)" "claude-marathon 0.1.0" "entrypoint: --version prints version"
+assert_eq "$("$BIN" --version)" "claude-marathon 0.1.1" "entrypoint: --version prints version"
 "$BIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "entrypoint: --help -> rc 0"
 "$BIN" --resume >/dev/null 2>&1; assert_eq "$?" "64" "entrypoint: --resume without id -> exit 64"
 "$BIN" --demo >/dev/null 2>&1; assert_eq "$?" "0" "entrypoint: --demo completes synthetic run"
@@ -403,7 +403,7 @@ assert_eq "$("$BIN" --version)" "claude-marathon 0.1.0" "entrypoint: --version p
 # --- entrypoint via symlink (finds lib through resolved path) ---
 LINK_TMP=$(mktemp -d)
 ln -s "$BIN" "$LINK_TMP/claude-marathon"
-assert_eq "$("$LINK_TMP/claude-marathon" --version)" "claude-marathon 0.1.0" \
+assert_eq "$("$LINK_TMP/claude-marathon" --version)" "claude-marathon 0.1.1" \
   "entrypoint: works when invoked via symlink"
 rm -rf "$LINK_TMP"
 
@@ -452,7 +452,7 @@ LAUNCHD_BIN="$HERE/../marathon-launchd"
 chmod +x "$LAUNCHD_BIN" 2>/dev/null || true
 "$LAUNCHD_BIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-launchd: no args -> usage exit 64"
 "$LAUNCHD_BIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "marathon-launchd: --help -> rc 0"
-assert_eq "$("$LAUNCHD_BIN" --version)" "claude-marathon 0.1.0" "marathon-launchd: --version"
+assert_eq "$("$LAUNCHD_BIN" --version)" "claude-marathon 0.1.1" "marathon-launchd: --version"
 LD_TMP=$(mktemp -d)
 mkdir -p "$LD_TMP/home/Library/LaunchAgents" "$LD_TMP/work"
 printf 'queued task\n' > "$LD_TMP/tasks.txt"

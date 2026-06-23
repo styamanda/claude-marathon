@@ -17,7 +17,7 @@
 : "${MARATHON_WAIT_POLL:=60}"
 
 marathon_version() {
-  echo "claude-marathon 0.1.0"
+  echo "claude-marathon 0.1.1"
 }
 
 # contains_smart_quotes <str> -> rc 0 if str contains a curly/smart quote.

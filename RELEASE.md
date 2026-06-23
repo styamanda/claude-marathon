@@ -17,8 +17,9 @@ Use this when cutting a public GitHub release.
 ## Tag and publish
 
 ```bash
-git tag -a v0.1.0 -m "claude-marathon v0.1.0"
-git push origin main --tags
+VERSION=$(./claude-marathon --version | awk '{print $2}')
+git tag -a "v${VERSION}" -m "claude-marathon v${VERSION}"
+git push origin main "v${VERSION}"
 ```
 
 Create a GitHub release from the tag with:
