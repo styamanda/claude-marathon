@@ -539,6 +539,42 @@ marathon_heartbeat() {
   done
 }
 
+# marathon_format_stream <outfile> -> read claude stream-json (NDJSON) on stdin;
+# narrate human-readable progress to stdout (the live log) and capture the final
+# `result` event to <outfile> for classify_result/detect_limit. Falls back to the
+# last bare JSON object when no typed result arrives (covers --output-format json,
+# error payloads, and the test stubs), and passes non-JSON lines through verbatim.
+marathon_format_stream() {
+  local outfile="$1" line typ text fallback="" got=0
+  : > "$outfile"
+  while IFS= read -r line; do
+    typ=$(printf '%s' "$line" | jq -r 'if type=="object" then (.type // "") else "" end' 2>/dev/null) || typ=""
+    case "$typ" in
+      result)
+        printf '%s\n' "$line" > "$outfile"; got=1
+        printf '[%s] ● result: %s\n' "$(date '+%H:%M:%S')" \
+          "$(printf '%s' "$line" | jq -r '.subtype // (if .is_error then "error" else "ok" end)' 2>/dev/null)"
+        ;;
+      assistant)
+        text=$(printf '%s' "$line" | jq -r '.message.content[]? | select(.type=="text") | .text' 2>/dev/null)
+        [[ -n "$text" ]] && printf '[%s] claude: %s\n' "$(date '+%H:%M:%S')" "$text"
+        printf '%s' "$line" \
+          | jq -r '.message.content[]? | select(.type=="tool_use") | "🔧 \(.name): \((.input|tostring)[0:120])"' 2>/dev/null \
+          | while IFS= read -r t; do [[ -n "$t" ]] && printf '[%s]   %s\n' "$(date '+%H:%M:%S')" "$t"; done
+        ;;
+      system|user) : ;;
+      *)
+        if printf '%s' "$line" | jq -e 'type=="object"' >/dev/null 2>&1; then
+          fallback="$line"
+        elif [[ -n "$line" ]]; then
+          printf '%s\n' "$line"
+        fi
+        ;;
+    esac
+  done
+  (( got )) || { [[ -n "$fallback" ]] && printf '%s\n' "$fallback" > "$outfile"; }
+}
+
 # run_iteration <iter> <workdir> <task> <outfile> [resume_id] -> claude exit code
 # Iteration 0: seed a fresh conversation, OR resume <resume_id> if given.
 # Iterations 1+: always --continue the most recent conversation in workdir.
@@ -548,7 +584,7 @@ run_iteration() {
   local instr="When the ENTIRE task is fully complete and verified, your final action must be to create an empty file named '${sentinel}' in this directory. Do not create it until everything is truly finished."
 
   local -a cmd
-  cmd=( "${MARATHON_CLAUDE_CMD:-claude}" -p --output-format json --permission-mode bypassPermissions )
+  cmd=( "${MARATHON_CLAUDE_CMD:-claude}" -p --permission-mode bypassPermissions )
   if (( iter == 0 )); then
     if [[ -n "$resume_id" ]]; then
       cmd+=( --resume "$resume_id" "${task}"$'\n\n'"${instr}" )
@@ -559,8 +595,19 @@ run_iteration() {
     cmd+=( --continue "Continue the task where you left off. ${instr}" )
   fi
 
-  ( cd "$workdir" && run_with_timeout "${MARATHON_TIMEOUT:-7200}" "${cmd[@]}" ) > "$outfile" 2>&1
-  return $?
+  # Escape hatch: revert to the old single-blob capture if streaming misbehaves.
+  if [[ "${MARATHON_NO_STREAM:-0}" == 1 ]]; then
+    cmd+=( --output-format json )
+    ( cd "$workdir" && run_with_timeout "${MARATHON_TIMEOUT:-7200}" "${cmd[@]}" ) > "$outfile" 2>&1
+    return $?
+  fi
+  # Stream NDJSON so the live log shows each message/tool call as it happens. The
+  # formatter narrates to stdout (the live log) and captures the final `result`
+  # event to "$outfile" for classify_result. stream-json requires --verbose with -p.
+  cmd+=( --output-format stream-json --verbose )
+  ( cd "$workdir" && run_with_timeout "${MARATHON_TIMEOUT:-7200}" "${cmd[@]}" 2>&1 ) \
+    | marathon_format_stream "$outfile"
+  return "${PIPESTATUS[0]}"   # claude's exit code (or 124 timeout), not the formatter's
 }
 
 # run_marathon <task> [workdir] [resume_id]

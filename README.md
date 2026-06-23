@@ -174,6 +174,29 @@ See `SECURITY.md` for the threat model and safe-use checklist.
 | `MARATHON_HEARTBEAT` | 300 | Seconds between "still working"/"still waiting" log pulses (0 = off) |
 | `MARATHON_WAIT_POLL` | 60 | Limit-wait poll interval (s) — how soon it resumes after the Mac wakes |
 | `MARATHON_ALLOW_SHARED_DIR` | unset | Set `1` to skip the "another Claude session is active here" guard |
+| `MARATHON_NO_STREAM` | unset | Set `1` to disable live streaming (`stream-json`) and capture one result blob per iteration instead |
+
+## Reading the live log
+
+Each iteration streams Claude's work to the log **as it happens** (via
+`--output-format stream-json`): a start line, then each assistant message
+(`claude: …`) and tool call (`🔧 Bash: …`, `🔧 Write: …`) as Claude makes it,
+then `● result: <subtype>` when the turn ends. A heartbeat
+(`… still working (~Nm elapsed)`) every `MARATHON_HEARTBEAT` seconds fills any
+silent stretch (the model thinking, or a long tool emitting no events). When a
+usage limit is hit the log shows the wait **and the absolute wake time**, e.g.
+`waiting ~13380s (until 10:41:04 BST), then retrying`, and pulses
+`… still waiting for usage reset (~Nm left, until HH:MM)` while it waits.
+
+The limit wait is timed against the **real wall clock**, not a fixed-duration
+`sleep`, so it survives the Mac sleeping: if the machine sleeps mid-wait, the
+run resumes the moment it wakes instead of freezing with the countdown stuck.
+
+A marathon is headless, so it cannot be watched from the VS Code extension or
+the Claude Code app (those are for interactive sessions) — the terminal is the
+place: `--watch` (auto-opens a window) or `tail -F` the log. Set
+`MARATHON_NO_STREAM=1` to revert to the older single-blob output (one result
+line at the end, no live narration).
 
 ## Laptop sleep & overnight runs
 

@@ -155,29 +155,49 @@ ITER_TMP=$(mktemp -d)
 export FAKE_CLAUDE_OUT="$HERE/fixtures/success.json"
 export FAKE_CLAUDE_ARGV="$ITER_TMP/argv.txt"
 MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
-  run_iteration 0 "$ITER_TMP" "Build the thing" "$ITER_TMP/out0.log"
+  run_iteration 0 "$ITER_TMP" "Build the thing" "$ITER_TMP/out0.log" >/dev/null
 assert_eq "$?" "0" "iteration: returns underlying exit code"
 assert_eq "$(grep -c 'Did some work' "$ITER_TMP/out0.log")" "1" "iteration: writes claude output to logfile"
 assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "0" "iteration 0: seed run has no --continue"
 
 MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
-  run_iteration 1 "$ITER_TMP" "Build the thing" "$ITER_TMP/out1.log"
+  run_iteration 1 "$ITER_TMP" "Build the thing" "$ITER_TMP/out1.log" >/dev/null
 assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "1" "iteration 1: resume run uses --continue"
 
 # resume id applies on iteration 0
 MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
-  run_iteration 0 "$ITER_TMP" "Continue" "$ITER_TMP/outr0.log" "sess-abc123"
+  run_iteration 0 "$ITER_TMP" "Continue" "$ITER_TMP/outr0.log" "sess-abc123" >/dev/null
 assert_eq "$(grep -c -- '--resume sess-abc123' "$ITER_TMP/argv.txt")" "1" "iteration 0 + resume id: uses --resume <id>"
 assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "0" "iteration 0 + resume id: no --continue"
 
 # resume id ignored on iteration 1 (still --continue)
 MARATHON_CLAUDE_CMD="$HERE/fake-claude.sh" \
-  run_iteration 1 "$ITER_TMP" "Continue" "$ITER_TMP/outr1.log" "sess-abc123"
+  run_iteration 1 "$ITER_TMP" "Continue" "$ITER_TMP/outr1.log" "sess-abc123" >/dev/null
 assert_eq "$(grep -c -- '--resume' "$ITER_TMP/argv.txt")" "0" "iteration 1 + resume id: no --resume"
 assert_eq "$(grep -c -- '--continue' "$ITER_TMP/argv.txt")" "1" "iteration 1 + resume id: uses --continue"
 
 unset FAKE_CLAUDE_OUT FAKE_CLAUDE_ARGV
 rm -rf "$ITER_TMP"
+
+# --- marathon_format_stream (live narration + result capture) ---
+FS_TMP=$(mktemp -d)
+FS_OUT=$(marathon_format_stream "$FS_TMP/result.json" < "$HERE/fixtures/stream.jsonl")
+assert_eq "$(grep -c '"type":"result"' "$FS_TMP/result.json")" "1" \
+  "format_stream: captures exactly the result event to outfile"
+assert_eq "$(classify_result "$(cat "$FS_TMP/result.json")" 0)" "OK" \
+  "format_stream: captured result still classifies (OK)"
+assert_eq "$(printf '%s\n' "$FS_OUT" | grep -c 'claude: Running the tests.')" "1" \
+  "format_stream: narrates assistant text to the live log"
+assert_eq "$(printf '%s\n' "$FS_OUT" | grep -c 'Bash:')" "1" \
+  "format_stream: narrates each tool call"
+# non-JSON passes through; a bare object (no .type) is captured via the fallback
+FS_OUT2=$(printf '%s\n' 'boom: crashed' '{"is_error":false,"result":"bare ok"}' \
+          | marathon_format_stream "$FS_TMP/result2.json")
+assert_eq "$(printf '%s\n' "$FS_OUT2" | grep -c 'boom: crashed')" "1" \
+  "format_stream: passes non-JSON lines through verbatim"
+assert_eq "$(grep -c 'bare ok' "$FS_TMP/result2.json")" "1" \
+  "format_stream: falls back to the last bare JSON object as the result"
+rm -rf "$FS_TMP"
 
 # --- run_marathon: limit, limit, then done via sentinel ---
 LOOP_TMP=$(mktemp -d)

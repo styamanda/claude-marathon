@@ -174,6 +174,7 @@ For a foreground run: `Ctrl-C`.
 | `MARATHON_HEARTBEAT` | 300 | Seconds between "still working"/"still waiting" pulses (0 = off) |
 | `MARATHON_WAIT_POLL` | 60 | Limit-wait poll interval (s) — how soon it resumes after the Mac wakes |
 | `MARATHON_ALLOW_SHARED_DIR` | unset | Set `1` to skip the "another Claude session is active here" guard |
+| `MARATHON_NO_STREAM` | unset | Set `1` to disable live streaming and emit one result blob per iteration |
 
 ## Quick reference (the 90% case)
 
