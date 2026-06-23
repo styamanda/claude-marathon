@@ -13,7 +13,7 @@ class ClaudeMarathon < Formula
   homepage "https://github.com/styamanda/claude-marathon"
   url "https://github.com/styamanda/claude-marathon/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_TARBALL_SHA256"
-  license "REPLACE_WITH_LICENSE"
+  license "MIT"
 
   depends_on "jq"
 
@@ -47,7 +47,6 @@ brew install claude-marathon
 
 ## Notes
 
-- Choose and add a real project license before publishing the formula.
 - The formula installs the repo under `libexec` and writes wrapper scripts into
   `bin`, preserving the relative layout required by `marathon-lib.sh` and the
   demo directory.

@@ -23,12 +23,13 @@ has_text() {
 }
 
 check "LICENSE exists" has_file LICENSE
+check "LICENSE is MIT" has_text LICENSE '^MIT License$'
 check "CHANGELOG has dated 0.1.0 entry" has_text CHANGELOG.md '^## 0\.1\.0 - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$'
 check "README mentions install.sh" has_text README.md './install.sh'
 check "README mentions claude-marathon --demo" has_text README.md 'claude-marathon --demo'
 check "README mentions SECURITY.md" has_text README.md 'SECURITY.md'
 check "Release checklist mentions repo metadata" has_text RELEASE.md 'docs/REPO_METADATA.md'
-check "Homebrew notes mention license placeholder" has_text docs/HOMEBREW.md 'REPLACE_WITH_LICENSE'
+check "Homebrew formula uses MIT license" has_text docs/HOMEBREW.md 'license "MIT"'
 
 if (( fail )); then
   echo

@@ -8,8 +8,8 @@ Use this when cutting a public GitHub release.
 - Run `make release-check` and resolve any failures.
 - Confirm `claude-marathon --doctor` gives useful output on a normal install.
 - Confirm the README quick start matches the released command names.
-- Choose and add a real project license before the first public release.
-- Update `CHANGELOG.md` from `unreleased` to the release date.
+- Confirm `LICENSE` and the Homebrew formula use the intended license.
+- Confirm `CHANGELOG.md` has the release date.
 - Apply the description and topics from `docs/REPO_METADATA.md`.
 - If publishing through Homebrew, prepare the tap formula from
   `docs/HOMEBREW.md` after the tag exists.

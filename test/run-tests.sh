@@ -648,7 +648,7 @@ rm -rf "$INST_TMP"
 
 # --- release preflight ---
 "$HERE/../scripts/release-check.sh" >/dev/null 2>&1
-assert_eq "$?" "1" "release-check: fails until LICENSE and dated changelog exist"
+assert_eq "$?" "0" "release-check: passes with LICENSE and dated changelog"
 
 rm -f "$NOW_FAR"
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - unreleased
+## 0.1.0 - 2026-06-23
 
 First community-ready release candidate.
 
@@ -22,6 +22,7 @@ First community-ready release candidate.
 - Local symlink uninstaller via `./uninstall.sh`.
 - Release preflight checks via `make release-check`.
 - Simulated limit/reset demo via `./demo/simulated-limit.sh`.
+- MIT license.
 - GitHub CI workflow, issue templates, contribution notes, release checklist,
   security notes, Homebrew formula template, and recommended repo metadata.
 

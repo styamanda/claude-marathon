@@ -267,3 +267,7 @@ log shows `Rate/usage limit hit; waiting ~Ns (until HH:MM:SS TZ), then retrying
 own fresh isolated session. Tasks in the file are separated by a line containing
 only `---`. Continues past failures by default; `--stop-on-fail` halts on the
 first. Run it detached overnight via `marathon-launchd --queue <file> [workdir]`.
+
+## License
+
+MIT. See `LICENSE`.
