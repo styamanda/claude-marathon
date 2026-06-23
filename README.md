@@ -37,6 +37,7 @@ notifications, and `--watch` are macOS-specific.
 Homebrew:
 
     brew tap styamanda/tap
+    brew trust styamanda/tap
     brew install claude-marathon
 
 Source checkout:

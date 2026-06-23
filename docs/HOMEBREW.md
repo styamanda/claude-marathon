@@ -4,6 +4,7 @@ The public tap is:
 
 ```bash
 brew tap styamanda/tap
+brew trust styamanda/tap
 brew install claude-marathon
 ```
 
