@@ -201,6 +201,70 @@ _marathon_command_available() {
   fi
 }
 
+_marathon_truncate() {
+  local s="$1" max="${2:-96}"
+  s=${s//$'\n'/ }
+  if (( ${#s} > max && max > 3 )); then
+    printf '%s...' "${s:0:max-3}"
+  else
+    printf '%s' "$s"
+  fi
+}
+
+_marathon_plist_extract() {
+  local plist="$1" key="$2"
+  [[ -f "$plist" ]] || return 1
+  command -v plutil >/dev/null 2>&1 || return 1
+  plutil -extract "$key" raw "$plist" 2>/dev/null
+}
+
+# marathon_launchd_jobs -> list loaded com.claude-marathon LaunchAgents and the
+# exact bootout command for each label. Uses plist metadata when the LaunchAgent
+# file still exists, but still lists labels from launchctl when it does not.
+marathon_launchd_jobs() {
+  local launchctl_cmd="${MARATHON_LAUNCHCTL_CMD:-launchctl}"
+  local uid="${MARATHON_GUI_UID:-$(id -u)}"
+  if ! _marathon_command_available "$launchctl_cmd"; then
+    echo "(launchd unavailable: launchctl not found)"
+    return 0
+  fi
+
+  local rows
+  rows=$("$launchctl_cmd" list 2>/dev/null \
+    | awk '$3 ~ /^com[.]claude-marathon[.]/ {print $1 "\t" $2 "\t" $3}')
+  if [[ -z "$rows" ]]; then
+    echo "(no launchd marathon jobs)"
+    return 0
+  fi
+
+  echo "launchd marathon jobs:"
+  local pid status label state plist workdir log queue task
+  while IFS=$'\t' read -r pid status label; do
+    [[ -n "$label" ]] || continue
+    if [[ "$pid" == "-" ]]; then
+      state="EXITED  status=${status:-?}"
+    else
+      state="RUNNING pid=${pid:-?} status=${status:-?}"
+    fi
+    printf '  %-24s %s\n' "$state" "$label"
+
+    plist="$HOME/Library/LaunchAgents/${label}.plist"
+    workdir=$(_marathon_plist_extract "$plist" "EnvironmentVariables.MARATHON_WORKDIR")
+    log=$(_marathon_plist_extract "$plist" "StandardOutPath")
+    queue=$(_marathon_plist_extract "$plist" "EnvironmentVariables.MARATHON_QUEUE")
+    task=$(_marathon_plist_extract "$plist" "EnvironmentVariables.MARATHON_TASK")
+
+    [[ -n "$workdir" ]] && printf '    workdir: %s\n' "$workdir"
+    if [[ -n "$queue" ]]; then
+      printf '    queue:   %s\n' "$queue"
+    elif [[ -n "$task" ]]; then
+      printf '    task:    %s\n' "$(_marathon_truncate "$task" 96)"
+    fi
+    [[ -n "$log" ]] && printf '    log:     %s\n' "$log"
+    printf '    stop:    launchctl bootout gui/%s/%s\n' "$uid" "$label"
+  done <<< "$rows"
+}
+
 _marathon_doctor_line() {
   local status="$1" name="$2" detail="${3:-}"
   if [[ -n "$detail" ]]; then

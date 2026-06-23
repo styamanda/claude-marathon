@@ -453,6 +453,54 @@ chmod +x "$LAUNCHD_BIN" 2>/dev/null || true
 "$LAUNCHD_BIN" >/dev/null 2>&1; assert_eq "$?" "64" "marathon-launchd: no args -> usage exit 64"
 "$LAUNCHD_BIN" --help >/dev/null 2>&1; assert_eq "$?" "0" "marathon-launchd: --help -> rc 0"
 assert_eq "$("$LAUNCHD_BIN" --version)" "claude-marathon 0.1.0" "marathon-launchd: --version"
+LD_TMP=$(mktemp -d)
+mkdir -p "$LD_TMP/home/Library/LaunchAgents" "$LD_TMP/work"
+printf 'queued task\n' > "$LD_TMP/tasks.txt"
+HOME="$LD_TMP/home" render_launchd_plist "com.claude-marathon.test" \
+  "Do a task that has enough detail to show in the list output" "$LD_TMP/work" \
+  "$LD_TMP/test.log" "$HERE/../claude-marathon" > "$LD_TMP/home/Library/LaunchAgents/com.claude-marathon.test.plist"
+HOME="$LD_TMP/home" render_launchd_queue_plist "com.claude-marathon.exited" \
+  "$LD_TMP/tasks.txt" "$LD_TMP/work" "$LD_TMP/exited.log" "$HERE/../marathon-queue" \
+  > "$LD_TMP/home/Library/LaunchAgents/com.claude-marathon.exited.plist"
+cat > "$LD_TMP/launchctl" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    cat <<'ROWS'
+PID	Status	Label
+123	0	com.claude-marathon.test
+-	78	com.claude-marathon.exited
+999	0	com.example.other
+ROWS
+    ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$LD_TMP/launchctl"
+LD_OUT=$(HOME="$LD_TMP/home" MARATHON_LAUNCHCTL_CMD="$LD_TMP/launchctl" MARATHON_GUI_UID=501 marathon_launchd_jobs)
+case "$LD_OUT" in *"RUNNING pid=123 status=0"*"com.claude-marathon.test"*) LD_RUNNING=yes;; *) LD_RUNNING=no;; esac
+assert_eq "$LD_RUNNING" "yes" "launchd-list: reports running marathon label"
+case "$LD_OUT" in *"EXITED  status=78"*"com.claude-marathon.exited"*) LD_EXITED=yes;; *) LD_EXITED=no;; esac
+assert_eq "$LD_EXITED" "yes" "launchd-list: reports exited marathon label"
+case "$LD_OUT" in *"workdir: $LD_TMP/work"*) LD_WD=yes;; *) LD_WD=no;; esac
+assert_eq "$LD_WD" "yes" "launchd-list: includes workdir from plist"
+case "$LD_OUT" in *"queue:   $LD_TMP/tasks.txt"*) LD_QUEUE=yes;; *) LD_QUEUE=no;; esac
+assert_eq "$LD_QUEUE" "yes" "launchd-list: includes queue file from plist"
+case "$LD_OUT" in *"stop:    launchctl bootout gui/501/com.claude-marathon.test"*) LD_STOP=yes;; *) LD_STOP=no;; esac
+assert_eq "$LD_STOP" "yes" "launchd-list: prints exact bootout command"
+LD_CLI=$(HOME="$LD_TMP/home" MARATHON_LAUNCHCTL_CMD="$LD_TMP/launchctl" MARATHON_GUI_UID=501 "$LAUNCHD_BIN" --list)
+case "$LD_CLI" in *"com.claude-marathon.test"*) LD_CLI_OK=yes;; *) LD_CLI_OK=no;; esac
+assert_eq "$LD_CLI_OK" "yes" "marathon-launchd: --list prints launchd jobs"
+cat > "$LD_TMP/launchctl-none" <<'EOF'
+#!/usr/bin/env bash
+echo 'PID	Status	Label'
+EOF
+chmod +x "$LD_TMP/launchctl-none"
+assert_eq "$(MARATHON_LAUNCHCTL_CMD="$LD_TMP/launchctl-none" marathon_launchd_jobs)" \
+  "(no launchd marathon jobs)" "launchd-list: empty launchctl list is friendly"
+assert_eq "$(MARATHON_LAUNCHCTL_CMD="$LD_TMP/missing" marathon_launchd_jobs)" \
+  "(launchd unavailable: launchctl not found)" "launchd-list: missing launchctl is friendly"
+rm -rf "$LD_TMP"
 DRY_TMP=$(mktemp -d)
 DRY_OUT=$(HOME="$DRY_TMP/home" MARATHON_LOG_DIR="$DRY_TMP/logs" "$LAUNCHD_BIN" --dry-run "test task" "$DRY_TMP")
 assert_eq "$?" "0" "marathon-launchd: --dry-run exits 0"

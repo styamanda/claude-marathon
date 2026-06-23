@@ -60,15 +60,8 @@ case "${1:-}" in
     ;;
   --status)
     marathon_status
-    if command -v launchctl >/dev/null 2>&1; then
-      echo
-      echo "launchd marathon jobs:"
-      if launchctl list 2>/dev/null | grep -q claude-marathon; then
-        { launchctl list 2>/dev/null | sed -n '1p'; launchctl list 2>/dev/null | grep claude-marathon; } | sed 's/^/  /'
-      else
-        echo "  (none)"
-      fi
-    fi
+    echo
+    marathon_launchd_jobs
     exit 0
     ;;
   --stop)

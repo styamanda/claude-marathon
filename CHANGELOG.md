@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `marathon-launchd --list` to show loaded LaunchAgents, workdirs/logs when
+  available, and exact `launchctl bootout` commands.
+
 ## 0.1.0 - 2026-06-23
 
 First community-ready release candidate.

@@ -83,6 +83,7 @@ Check recent runs:
 
     claude-marathon --status
     claude-marathon --logs
+    marathon-launchd --list
 
 Try a local simulated limit/reset run without using real Claude quota:
 
@@ -157,7 +158,10 @@ watch it work live, add `--watch` — it opens a Terminal window tailing the log
 The task text is passed through the plist's `EnvironmentVariables`, never
 shell-interpolated, so quotes and special characters in the task are safe.
 Logs and the plist are labelled `com.claude-marathon.<timestamp>`. Stop a run
-early with the `launchctl bootout ...` command printed at install time.
+early with `claude-marathon --stop /path/to/repo`, or find the launchd label
+and lower-level stop command later with:
+
+    ./marathon-launchd --list
 
 ## Safety
 
@@ -220,13 +224,15 @@ prints a warning when you launch on battery.
 ## Inspecting and stopping runs
 
     claude-marathon --status              # list every marathon: state, pid, workdir
+    marathon-launchd --list               # list loaded LaunchAgents and bootout commands
     claude-marathon --stop /path/to/repo  # stop the marathon for that repo, cleanly
 
 `--stop` signals the whole process tree (so the underlying `claude` can't keep
 running) and clears the lock, escalating to `SIGKILL` only if a job ignores the
 polite stop. A marathon now also exits cleanly on `launchctl bootout` / `kill`
 (it releases its lock and actually terminates, rather than lingering as an
-orphan that holds a stale lock).
+orphan that holds a stale lock). Use `marathon-launchd --list` when you need the
+exact `launchctl bootout gui/<uid>/<label>` command for a detached job.
 
 ## Tests
 

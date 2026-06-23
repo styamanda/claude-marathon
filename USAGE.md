@@ -95,6 +95,7 @@ Do NOT have an interactive session open in the same directory at the same time.
     claude-marathon --status         # running/stale jobs and launchd labels
     claude-marathon --logs           # recent logs, newest first
     claude-marathon --tail           # tail the newest log
+    marathon-launchd --list          # loaded LaunchAgents and bootout commands
 
 The job is headless: it streams to the log, not to the VS Code extension or the
 Claude Code app (those show interactive sessions only). Watch it live in a
@@ -146,6 +147,7 @@ same repo, stop the current job first (see below). Locks live in
 ## 6. Stop a job early
 
     claude-marathon --status                   # see what's running (state, pid, workdir)
+    marathon-launchd --list                    # see launchd labels and bootout commands
     claude-marathon --stop /path/to/repo       # stop that repo's marathon cleanly + clear its lock
 
 `--stop` signals the whole process tree (so the underlying `claude` can't keep
@@ -154,6 +156,10 @@ also works on a detached `marathon-launchd` job — the LaunchAgent self-removes
 when its worker exits. The lower-level equivalent still works too:
 
     launchctl bootout gui/$(id -u)/<label>     # label is printed at launch / is the log filename
+
+Use `marathon-launchd --list` if you did not keep the original launch output;
+it prints the active labels, logs, workdirs when available, and exact bootout
+commands.
 
 For a foreground run: `Ctrl-C`.
 

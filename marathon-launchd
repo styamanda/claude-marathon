@@ -14,6 +14,7 @@ source "$SCRIPT_DIR/marathon-lib.sh"
 show_usage() {
   cat <<'USAGE'
 Usage:
+  marathon-launchd --list
   marathon-launchd [--dry-run] [--resume <session-id>] "<task>" [workdir]
   marathon-launchd [--dry-run] --queue <file> [--stop-on-fail] [workdir]
 
@@ -23,6 +24,7 @@ will not re-run on reboot.
 
   -h, --help       Show this help
   -v, --version    Print version
+  --list           List loaded claude-marathon LaunchAgents and stop commands.
   --dry-run        Write the plist and print the load command, but don't load it.
   --watch          After loading, open a Terminal window tailing the live log.
   --resume <id>    Resume a specific existing session on the first iteration.
@@ -35,6 +37,7 @@ USAGE
 case "${1:-}" in
   -h|--help) show_usage; exit 0 ;;
   -v|--version) marathon_version; exit 0 ;;
+  --list) marathon_launchd_jobs; exit $? ;;
 esac
 
 DRYRUN=0
